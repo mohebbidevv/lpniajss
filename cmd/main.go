@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"golaunch/internal/application"
 	"golaunch/internal/domain/entities"
+	"golaunch/internal/infrastructure/caddy"
 	"golaunch/internal/infrastructure/config"
 	"golaunch/internal/infrastructure/database/postgres"
 	packageHttp "golaunch/internal/infrastructure/http"
@@ -93,9 +94,19 @@ func main() {
 			return err
 		}
 
+		if err := caddyClient.RegisterRoute(project.UniqueKey, project.Port); err != nil {
+			// don't fail the whole deploy over this — log it and continue
+			send("stderr", fmt.Sprintf("[runner] warning: failed to register route: %v", err))
+		} else {
+			send("stdout", fmt.Sprintf("[runner] live at https://%s.%s", project.UniqueKey, "golaunch.dev"))
+		}
+
 		_ = dbRepo.UpdateStatus(context.Background(), job.ProjectID, entities.StatusStopped)
 		return nil
 	}
+
+	// caddyClient := caddy.NewCaddyClient("http://localhost:2019", "golaunch.dev")
+
 
 	workerPool := queue.NewWorkerPool(15, processor)
 	workerPool.Start()
