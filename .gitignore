@@ -47,8 +47,8 @@ Thumbs.db
 *.zip
 
 # Markdown files
-*.md
-*.mdx
+#*.md
+#*.mdx
 
 configuration.json
 /uploads/
