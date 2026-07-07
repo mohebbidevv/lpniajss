@@ -4,13 +4,13 @@
 }
 
 # your Go API
-api.golaunch.dev {
+api.launchpad.ir {
     reverse_proxy localhost:5000
 }
 
 # wildcard — catches all subdomains like abc123.golaunch.dev
 # Caddy's dynamic routes (added via API) take priority over this
-*.golaunch.dev {
+*.launchpad.ir {
     # wildcard TLS — Caddy handles the cert automatically
     tls {
         dns <your-dns-provider>  # needed for wildcard certs
