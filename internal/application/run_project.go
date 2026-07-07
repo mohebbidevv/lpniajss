@@ -8,6 +8,7 @@ import (
 
 	"golaunch/internal/domain/entities"
 	"golaunch/internal/domain/repository"
+	"golaunch/internal/infrastructure/caddy"
 	"golaunch/internal/infrastructure/utils"
 	"golaunch/internal/queue"
 	"os"
@@ -37,14 +38,16 @@ type RunProjectUseCase struct {
 	Runner      *ProjectRunner
 	WP          *queue.WorkerPool
 	Registry    *LogRegistry
+	Caddy *caddy.CaddyClient
 }
 
-func NewRunProjectUseCase(repo repository.ProjectRepository, wp *queue.WorkerPool, registry *LogRegistry) *RunProjectUseCase {
+func NewRunProjectUseCase(repo repository.ProjectRepository, wp *queue.WorkerPool, registry *LogRegistry, caddyClient *caddy.CaddyClient) *RunProjectUseCase {
 	return &RunProjectUseCase{
 		ProjectRepo: repo,
 		Runner:      NewProjectRunner(),
 		Registry:    registry,
 		WP: wp,
+		Caddy: caddyClient,
 	}
 }
 
