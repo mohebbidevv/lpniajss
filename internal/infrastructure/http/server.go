@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"golaunch/internal/application"
+	"golaunch/internal/infrastructure/caddy"
 	"golaunch/internal/infrastructure/database/postgres"
 	handler "golaunch/internal/infrastructure/http/handlers"
 	"golaunch/internal/infrastructure/storage"
@@ -21,9 +22,9 @@ func InitializeUploadHandler(db *pgxpool.Pool) *handler.UploadHandler {
 	return handler.NewUplaodHandler(useCase)
 }
 
-func InitializeRunProjectHandler(db *pgxpool.Pool, wp *queue.WorkerPool, registry *application.LogRegistry) *handler.RunHandler {
+func InitializeRunProjectHandler(db *pgxpool.Pool, wp *queue.WorkerPool, caddyclient *caddy.CaddyClient, registry *application.LogRegistry) *handler.RunHandler {
 	dbRepo := postgres.NewProjectRepository(db) // same repo, fresh instance
-	useCase := application.NewRunProjectUseCase(dbRepo, wp, registry)
+	useCase := application.NewRunProjectUseCase(dbRepo, wp, registry, caddyclient)
 	return handler.NewRunHandler(useCase)
 }
 
