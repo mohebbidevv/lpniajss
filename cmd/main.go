@@ -55,10 +55,12 @@ func main() {
 		}
 	}()
 	mux := nethttp.NewServeMux()
-
+	
 	registry := application.NewLogRegistry()
 	projRunner := application.NewProjectRunner()
 	dbRepo := postgres.NewProjectRepository(dbPool)
+	
+	caddyClient := caddy.NewCaddyClient("http://localhost:2019", "launchpad.ir")
 
 	processor := func(ctx context.Context, job queue.Job) error {
 		logCh, ok := registry.Get(job.ProjectID)
@@ -105,7 +107,6 @@ func main() {
 		return nil
 	}
 
-	// caddyClient := caddy.NewCaddyClient("http://localhost:2019", "golaunch.dev")
 
 
 	workerPool := queue.NewWorkerPool(15, processor)
