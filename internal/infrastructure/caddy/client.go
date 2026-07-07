@@ -99,6 +99,7 @@ func (c *CaddyClient) RemoveRoute(uniqueKey string) error {
 
 	// GET current routes
 	url := fmt.Sprintf("%s/config/apps/http/servers/srv0/routes", c.AdminURL)
+	
 	resp, err := http.Get(url)
 	if err != nil {
 		return fmt.Errorf("failed to get routes: %w", err)
