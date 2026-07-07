@@ -28,9 +28,9 @@ func InitializeRunProjectHandler(db *pgxpool.Pool, wp *queue.WorkerPool, caddycl
 	return handler.NewRunHandler(useCase)
 }
 
-func InitializeRoutes(ctx context.Context, db *pgxpool.Pool, wp *queue.WorkerPool, registry *application.LogRegistry, mux *http.ServeMux) {
+func InitializeRoutes(ctx context.Context, db *pgxpool.Pool, wp *queue.WorkerPool, caddyClient *caddy.CaddyClient, registry *application.LogRegistry, mux *http.ServeMux) {
 	uploadHandler := InitializeUploadHandler(db)
-	runHandler := InitializeRunProjectHandler(db, wp, registry)
+	runHandler := InitializeRunProjectHandler(db, wp, caddyClient, registry)
 
 	mux.Handle("/upload", withCORS(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		uploadHandler.ServeHTTP(ctx, w, r)
