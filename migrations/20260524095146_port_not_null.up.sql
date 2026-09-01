@@ -1,0 +1,5 @@
+UPDATE projects SET port = 0 WHERE port IS NULL;
+
+ALTER TABLE projects ALTER COLUMN port SET DEFAULT 0;
+
+ALTER TABLE projects ALTER COLUMN port SET NOT NULL;

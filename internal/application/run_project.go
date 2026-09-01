@@ -1,31 +1,15 @@
 package application
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"fmt"
 
-	"golaunch/internal/domain/entities"
 	"golaunch/internal/domain/repository"
-	"golaunch/internal/infrastructure/caddy"
 	"golaunch/internal/infrastructure/utils"
 	"golaunch/internal/queue"
 	"os"
 	"path/filepath"
-	"sync/atomic"
 )
-
-// port counter — starts at 3000, increments per project
-var portCounter atomic.Int32
-
-func init() {
-	portCounter.Store(3000)
-}
-
-func nextPort() int {
-	return int(portCounter.Add(1))
-}
 
 // LogLine is what gets pushed over SSE
 type LogLine struct {
@@ -33,21 +17,21 @@ type LogLine struct {
 	Text   string
 }
 
+// RunProjectUseCase is a fast receptionist: validate, register a log
+// channel, submit the deploy job, return the channel. All the actual
+// port allocation, deployment bookkeeping, and status transitions belong
+// to DeployPipeline, which the submitted job runs.
 type RunProjectUseCase struct {
 	ProjectRepo repository.ProjectRepository
-	Runner      *ProjectRunner
 	WP          *queue.WorkerPool
 	Registry    *LogRegistry
-	Caddy *caddy.CaddyClient
 }
 
-func NewRunProjectUseCase(repo repository.ProjectRepository, wp *queue.WorkerPool, registry *LogRegistry, caddyClient *caddy.CaddyClient) *RunProjectUseCase {
+func NewRunProjectUseCase(repo repository.ProjectRepository, wp *queue.WorkerPool, registry *LogRegistry) *RunProjectUseCase {
 	return &RunProjectUseCase{
 		ProjectRepo: repo,
-		Runner:      NewProjectRunner(),
 		Registry:    registry,
-		WP: wp,
-		Caddy: caddyClient,
+		WP:          wp,
 	}
 }
 
@@ -56,26 +40,14 @@ func (uc *RunProjectUseCase) Execute(
 	projectID string,
 ) (<-chan LogLine, error) {
 
-	project, err := uc.ProjectRepo.GetByID(ctx, projectID)
-	if err != nil {
+	if _, err := uc.ProjectRepo.GetByID(ctx, projectID); err != nil {
 		return nil, fmt.Errorf("project not found: %w", err)
 	}
-	if project.Status == entities.StatusRunning {
-		return nil, fmt.Errorf("project already running on port %d", project.Port)
-	}
-
-	port := nextPort()
-
-	if err := uc.ProjectRepo.UpdatePortAndStatus(ctx, projectID, port, entities.StatusBuilding); err != nil {
-		return nil, fmt.Errorf("failed to update status: %w", err)
-	}
-
-	// logCh := make(chan LogLine, 64) 
 
 	logCh := make(chan LogLine, 64)
 	uc.Registry.Register(projectID, logCh)
 
-	err = uc.WP.Submit(queue.Job{
+	err := uc.WP.Submit(queue.Job{
 		ID:        utils.NewID(),
 		ProjectID: projectID,
 	})
@@ -90,19 +62,6 @@ func (uc *RunProjectUseCase) Execute(
 	return logCh, nil
 }
 
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
-func splitLines(s string) []string {
-	var lines []string
-	sc := bufio.NewScanner(bytes.NewBufferString(s))
-	for sc.Scan() {
-		lines = append(lines, sc.Text())
-	}
-	return lines
-}
 func ResolveProjectRoot(extractPath string) (string, error) {
 	entries, err := os.ReadDir(extractPath)
 	if err != nil {

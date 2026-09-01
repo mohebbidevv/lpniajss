@@ -4,141 +4,158 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 )
 
-// CaddyClient talks to Caddy's admin API (localhost:2019 by default).
-// Caddy's API is a JSON tree — you POST to a path in the config tree
-// to add/update/delete routes. No restart needed, changes are instant.
 type CaddyClient struct {
-	AdminURL string // e.g. "http://localhost:2019"
-	Domain   string // e.g. "golaunch.dev" — subdomains go under this
+	AdminURL string
+	Domain   string
 }
 
 func NewCaddyClient(adminURL, domain string) *CaddyClient {
-	return &CaddyClient{
-		AdminURL: adminURL,
-		Domain:   domain,
-	}
+	return &CaddyClient{AdminURL: adminURL, Domain: domain}
 }
 
-// route is the JSON structure Caddy expects for one route entry.
-// Match: which hostname to match.
-// Handle: what to do — in our case, reverse proxy to the Node process.
 type route struct {
-	Match  []routeMatch  `json:"match"`
-	Handle []routeHandle `json:"handle"`
+	Match    []routeMatch      `json:"match"`
+	Handle   []json.RawMessage `json:"handle"`
+	Terminal bool              `json:"terminal,omitempty"`
 }
 
 type routeMatch struct {
 	Host []string `json:"host"`
 }
 
-type routeHandle struct {
-	Handler   string      `json:"handler"`
-	Upstreams []upstream  `json:"upstreams"`
+func (c *CaddyClient) routesURL() string {
+	return fmt.Sprintf("%s/config/apps/http/servers/srv0/routes", c.AdminURL)
 }
 
-type upstream struct {
-	Dial string `json:"dial"` // "localhost:3001"
+func (c *CaddyClient) getRoutes() ([]route, error) {
+	resp, err := http.Get(c.routesURL())
+	if err != nil {
+		return nil, fmt.Errorf("get routes: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("caddy returned %d: %s", resp.StatusCode, body)
+	}
+
+	var routes []route
+	if err := json.NewDecoder(resp.Body).Decode(&routes); err != nil {
+		return nil, fmt.Errorf("decode routes: %w", err)
+	}
+	return routes, nil
 }
 
-// RegisterRoute tells Caddy to route {uniqueKey}.{domain} → localhost:{port}.
-// This is called right after a project successfully starts.
-func (c *CaddyClient) RegisterRoute(uniqueKey string, port int) error {
-	hostname := fmt.Sprintf("%s.%s", uniqueKey, c.Domain)
-
-	r := route{
-		Match: []routeMatch{
-			{Host: []string{hostname}},
-		},
-		Handle: []routeHandle{
-			{
-				Handler: "reverse_proxy",
-				Upstreams: []upstream{
-					{Dial: fmt.Sprintf("localhost:%d", port)},
-				},
-			},
-		},
+func (c *CaddyClient) putRoutes(routes []route) error {
+	body, err := json.Marshal(routes)
+	if err != nil {
+		return fmt.Errorf("marshal routes: %w", err)
 	}
 
-	body, err := json.Marshal(r)
+	req, err := http.NewRequest(http.MethodPatch, c.routesURL(), bytes.NewBuffer(body))
 	if err != nil {
-		return fmt.Errorf("failed to marshal route: %w", err)
-	}
-
-	// POST to Caddy's config API.
-	// This appends a new route to the routes array.
-	// The path "..." means append to the array — Caddy's API syntax.
-	url := fmt.Sprintf("%s/config/apps/http/servers/srv0/routes/...", c.AdminURL)
-
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(body))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("caddy API request failed: %w", err)
+		return fmt.Errorf("caddy request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("caddy returned status %d", resp.StatusCode)
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("caddy returned %d: %s", resp.StatusCode, respBody)
 	}
-
 	return nil
 }
 
-// RemoveRoute removes the route for a project.
-// Called when a project is stopped or deleted.
-// Caddy routes are identified by index in the array — we find it by hostname first.
-func (c *CaddyClient) RemoveRoute(uniqueKey string) error {
-	hostname := fmt.Sprintf("%s.%s", uniqueKey, c.Domain)
-
-	// GET current routes
-	url := fmt.Sprintf("%s/config/apps/http/servers/srv0/routes", c.AdminURL)
-	
-	resp, err := http.Get(url)
+func buildReverseProxyRoute(hostname, dialTarget string) (route, error) {
+	handler := map[string]interface{}{
+		"handler":   "reverse_proxy",
+		"upstreams": []map[string]string{{"dial": dialTarget}},
+	}
+	handlerBytes, err := json.Marshal(handler)
 	if err != nil {
-		return fmt.Errorf("failed to get routes: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var routes []route
-	if err := json.NewDecoder(resp.Body).Decode(&routes); err != nil {
-		return fmt.Errorf("failed to decode routes: %w", err)
+		return route{}, fmt.Errorf("marshal handler: %w", err)
 	}
 
-	// find the index of our route
-	idx := -1
+	return route{
+		Match:    []routeMatch{{Host: []string{hostname}}},
+		Handle:   []json.RawMessage{handlerBytes},
+		Terminal: true,
+	}, nil
+}
+
+// RegisterRoute points {slug}.{domain} at dialTarget — "localhost:3001" for
+// host-exec, "project-abc123:3000" for a container on a shared Docker
+// network. The caller decides the target; this client doesn't know or
+// care which runtime produced it.
+func (c *CaddyClient) RegisterRoute(slug, dialTarget string) error {
+	hostname := fmt.Sprintf("%s.%s", slug, c.Domain)
+
+	routes, err := c.getRoutes()
+	if err != nil {
+		return err
+	}
+
+	newRoute, err := buildReverseProxyRoute(hostname, dialTarget)
+	if err != nil {
+		return err
+	}
+
+	replaced := false
 	for i, r := range routes {
-		for _, m := range r.Match {
-			for _, h := range m.Host {
-				if h == hostname {
-					idx = i
-				}
+		if matchesHost(r, hostname) {
+			routes[i] = newRoute
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		routes = append([]route{newRoute}, routes...)
+	}
+
+	return c.putRoutes(routes)
+}
+
+func (c *CaddyClient) RemoveRoute(slug string) error {
+	hostname := fmt.Sprintf("%s.%s", slug, c.Domain)
+
+	routes, err := c.getRoutes()
+	if err != nil {
+		return err
+	}
+
+	out := routes[:0]
+	found := false
+	for _, r := range routes {
+		if matchesHost(r, hostname) {
+			found = true
+			continue
+		}
+		out = append(out, r)
+	}
+	if !found {
+		return nil
+	}
+
+	return c.putRoutes(out)
+}
+
+func matchesHost(r route, hostname string) bool {
+	for _, m := range r.Match {
+		for _, h := range m.Host {
+			if h == hostname {
+				return true
 			}
 		}
 	}
-
-	if idx == -1 {
-		return nil // route doesn't exist — nothing to do
-	}
-
-	// DELETE by index
-	delURL := fmt.Sprintf("%s/config/apps/http/servers/srv0/routes/%d", c.AdminURL, idx)
-	req, err := http.NewRequest(http.MethodDelete, delURL, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create delete request: %w", err)
-	}
-
-	delResp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("caddy delete request failed: %w", err)
-	}
-	defer delResp.Body.Close()
-
-	return nil
+	return false
 }
+

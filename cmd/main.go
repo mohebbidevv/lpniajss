@@ -2,24 +2,21 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"golaunch/internal/application"
-	"golaunch/internal/domain/entities"
 	"golaunch/internal/infrastructure/caddy"
 	"golaunch/internal/infrastructure/config"
 	"golaunch/internal/infrastructure/database/postgres"
+	"golaunch/internal/infrastructure/hostexec"
 	packageHttp "golaunch/internal/infrastructure/http"
+	middleware "golaunch/internal/infrastructure/http/middlewares"
+	"golaunch/internal/infrastructure/vcsgit"
 	"golaunch/internal/queue"
 	"log"
 	nethttp "net/http"
 	"os"
-	"os/exec"
-	"sync"
 )
 
 var (
-	RunningMu sync.Mutex
-	Running   = map[string]*exec.Cmd{}
 	UploadDir = "./uploads"
 	WorkDir   = "./work"
 )
@@ -55,68 +52,55 @@ func main() {
 		}
 	}()
 	mux := nethttp.NewServeMux()
-	
+	handler := middleware.RequestLogger(mux)
+
 	registry := application.NewLogRegistry()
-	projRunner := application.NewProjectRunner()
 	dbRepo := postgres.NewProjectRepository(dbPool)
-	
-	caddyClient := caddy.NewCaddyClient("http://localhost:2019", "launchpad.ir")
+	deploymentRepo := postgres.NewDeploymentRepository(dbPool)
+
+	caddyClient := caddy.NewCaddyClient("http://localhost:2019", "localhost")
+
+	// host-exec runtime today; a Docker implementation of repository.Runtime
+	// and repository.ImageBuilder is a drop-in swap here later — nothing
+	// above the wiring in main.go needs to change.
+	hostRuntime := hostexec.NewHostExecRuntime()
+	hostBuilder := hostexec.NewHostExecImageBuilder()
+	gitSource := vcsgit.NewGitSource()
+
+	pipeline := application.NewDeployPipeline(dbRepo, deploymentRepo, hostRuntime, hostBuilder, gitSource, caddyClient, registry)
+
+	var eventConsumer *application.EventConsumer
 
 	processor := func(ctx context.Context, job queue.Job) error {
 		logCh, ok := registry.Get(job.ProjectID)
-		if !ok {
-			return fmt.Errorf("no log channel found for project %s", job.ProjectID)
+		if ok {
+			defer registry.Delete(job.ProjectID)
+			defer close(logCh)
 		}
-
-		defer registry.Delete(job.ProjectID)
-		defer close(logCh)
-
-		send := func(stream, text string) {
-			select {
-			case logCh <- application.LogLine{Stream: stream, Text: text}:
-			case <-ctx.Done():
-			}
+		err := pipeline.Deploy(ctx, job.ProjectID)
+		if err == nil && eventConsumer != nil {
+			eventConsumer.ResetCrashCount(job.ProjectID)
 		}
-
-		project, err := dbRepo.GetByID(ctx, job.ProjectID)
-		if err != nil {
-			return fmt.Errorf("project lookup failed: %w", err)
-		}
-
-		path, err := application.ResolveProjectRoot(project.SourceLocation)
-		if err != nil {
-			send("stderr", fmt.Sprintf("[runner] failed to resolve project root: %v", err))
-			_ = dbRepo.UpdateStatus(context.Background(), job.ProjectID, entities.StatusFailed)
-			return err
-		}
-
-		if err := projRunner.Run(ctx, path, project.Port, send); err != nil {
-			send("stderr", fmt.Sprintf("[runner] %v", err))
-			_ = dbRepo.UpdateStatus(context.Background(), job.ProjectID, entities.StatusFailed)
-			return err
-		}
-
-		if err := caddyClient.RegisterRoute(project.UniqueKey, project.Port); err != nil {
-			// don't fail the whole deploy over this — log it and continue
-			send("stderr", fmt.Sprintf("[runner] warning: failed to register route: %v", err))
-		} else {
-			send("stdout", fmt.Sprintf("[runner] live at https://%s.%s", project.UniqueKey, "golaunch.dev"))
-		}
-
-		_ = dbRepo.UpdateStatus(context.Background(), job.ProjectID, entities.StatusStopped)
-		return nil
+		return err
 	}
 
-
-
-	workerPool := queue.NewWorkerPool(15, processor)
+	// jobs are builds now, not long-lived process babysitting — the
+	// worker returns as soon as the app is started, so a small pool is
+	// plenty.
+	workerPool := queue.NewWorkerPool(4, processor)
 	workerPool.Start()
 	defer workerPool.ShutDown()
 
-	packageHttp.InitializeRoutes(ctx, dbPool, workerPool, registry, mux)
+	eventConsumer = application.NewEventConsumer(dbRepo, deploymentRepo, hostRuntime, caddyClient, workerPool)
+	go eventConsumer.Run(ctx)
+
+	reconciler := application.NewReconciler(deploymentRepo, hostRuntime, caddyClient, pipeline)
+	go reconciler.Run(ctx)
+
+	packageHttp.InitializeRoutes(ctx, dbPool, workerPool, caddyClient, registry, hostRuntime, mux)
 	server := &nethttp.Server{
 		Addr:    ":" + configuration.Server.Port,
-		Handler: mux,
+		Handler: handler,
 
 		// Open for later Timeouts
 	}

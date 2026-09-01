@@ -1,0 +1,34 @@
+🔴 Critical — security/isolation (this is the big one)
+Right now npm install + npm start for any uploaded/imported repo runs directly on your host, as a child of your own server process, with no sandboxing. This isn't a "nice to have" gap — it's the difference between a toy and something you'd let strangers deploy to:
+
+Arbitrary code execution on your host. Any package.json can have a malicious postinstall script, or the app itself can read /etc/passwd, scan your internal network, read other tenants' .env files sitting in nearby ./work/<project> dirs, or fork-bomb the box. There is currently nothing stopping one tenant's app from touching another tenant's files or your database credentials in memory/env.
+No resource limits. entities.ResourceLimits exists as a struct but is never enforced (I confirmed this in the trace). One tenant's app can consume 100% CPU/RAM and take every other deployment down with it.
+No network isolation. Every deployed app shares your host's network namespace — it can hit localhost:5432 (your Postgres), localhost:2019 (Caddy's admin API, which has no auth), or anything else bound to loopback/LAN.
+This is why the codebase's own comments keep pointing at Docker as "later" — that's not a style preference, it's the actual missing security boundary. This has to be solved before letting any dev besides yourself deploy to it. Options in order of effort:
+
+Docker/containerd per deployment (network namespace + cgroups + filesystem isolation) — matches the seam already built (Runtime/ImageBuilder interfaces).
+Firecracker/gVisor microVMs if you want stronger isolation than containers (what actual PaaS platforms like fly.io/Railway use under the hood).
+At minimum, if staying host-exec: run each app as its own unprivileged Linux user + cgroup + seccomp profile + no network to localhost. Much more fragile than real containers, don't recommend it as the end state.
+🟠 High — reliability essentials
+Caddy admin API has no auth. localhost:2019 with no auth token means anything on the host (including a deployed tenant app, per above) can rewrite all your routes. Needs at minimum a bound-to-localhost-only + auth token, or move to Caddy's admin.enforce_origin + API key.
+Build caching. Every deploy does a full npm install from scratch — no node_modules cache, no layer caching. This will make deploys painfully slow once repos have real dependency trees. Needs a persistent cache dir per-project (or shared with content-hash keys) that survives across deploys.
+No health checks before flipping traffic. Deploy() currently registers the Caddy route right after Runtime.Start() returns — it doesn't verify the app is actually listening/responding on that port yet. A slow-starting Next.js app will get 502s until it's ready. Needs a readiness probe (poll the port / an HTTP health endpoint) before RegisterRoute.
+No graceful shutdown for old deployment. Stop() sends SIGTERM then SIGKILL after a fixed timeout — fine — but there's no draining: in-flight requests to the old process during the cutover window could get cut off. Needs Caddy to stop routing new requests to the old target before killing it, with a short drain window.
+No persistent job queue. queue.WorkerPool is in-memory — if the server restarts mid-build, that job is just gone (not retried, not logged as failed). Should be backed by a durable queue (Postgres-based job table is fine at this scale) so deploys survive server restarts.
+No rate limiting / auth on the API itself. /upload, /import/github, /run/{id} have zero auth — anyone who can reach the server can deploy arbitrary code as any "user." Needs API keys/auth tokens minimum, ideally per-user project ownership checks (is there even a "user" concept in the DB? worth checking — if not, that's a bigger missing entity).
+Build/runtime timeouts. Nothing currently caps how long npm install/build/start can run — a hung install will occupy a worker slot forever. Add context timeouts.
+Reconciler robustness. As I noted earlier, it only runs once at startup and its premise (processes surviving a server restart) is questionable since they're direct children — worth testing what actually happens today when the server process dies (do children get orphaned to PID 1, or die too?), and building the process supervision model around whichever is actually true.
+🟡 Medium — real production expectations devs will assume exist
+TLS/custom domains. Right now everything is *.localhost behind an HTTP-only Caddy config. Real usage needs Caddy's automatic HTTPS (it does this natively, just needs a real domain + email directive) and a way for tenants to attach custom domains.
+Environment variables / secrets per project. No mechanism visible for a tenant to set their own env vars (API keys, DB URLs) — currently only PORT and the server's own os.Environ() get passed through, which is itself a leak (deployed apps inherit your server's entire environment, including possibly DB credentials).
+Logs retention/persistence. LogRegistry/SSE streaming is live-only — once the stream closes, is there a stored log history for a past deploy? Needed for debugging failed deploys after the fact.
+Deployment rollback. No "redeploy previous version" — right now redeploy always means rebuild-from-latest-source. Real devs will want one-click rollback to a prior deployment.
+Multi-instance/horizontal scaling of the builder itself. Right now it's one server process; if that box dies, everything dies. Eventually want the control plane (API + DB + queue) separate from the "worker" nodes actually running tenant apps, so you can scale workers independently and survive a single node failure.
+Database migration safety / zero-downtime schema changes, proper connection pooling limits, backups — standard Postgres production hygiene, but currently unclear if any of it exists beyond RunMigrations at boot.
+🟢 Nice-to-have / polish
+Build logs → structured + searchable, not just SSE-only.
+Webhook-triggered redeploys (GitHub push → auto-redeploy) instead of manual /run.
+Preview deployments per branch/PR.
+Usage metering/billing hooks if this is ever multi-tenant SaaS.
+Metrics/observability (Prometheus, deployment success rate, build duration).
+If I had to pick the one thing that actually blocks "real devs deploying real apps" from being reckless: containerization (or equivalent sandboxing) is the load-bearing gap. Everything else on the High list is "will definitely bite you," but the isolation gap is "will definitely get you owned or get one tenant's bug/malice to nuke everyone else's app." Want me to start scoping out the Docker Runtime/ImageBuilder implementation as the first concrete step, since the interfaces are already built for exactly that swap?

@@ -7,6 +7,8 @@ import (
 	"golaunch/internal/infrastructure/utils"
 	"io"
 	"path/filepath"
+	"regexp"
+	"strings"
 )
 
 type UploadProjectUseCase struct {
@@ -45,9 +47,9 @@ func NewUploadProjectUseCase(
 func (uc *UploadProjectUseCase) Execute(
 	ctx context.Context, input UploadInput) (*UploadOutput, error) {
 
-	uniqueID := utils.NewID()
-	zipPath := filepath.Join(uc.UploadDir, uniqueID+".zip")
-	extractPath := filepath.Join(uc.WorkDir, uniqueID)
+	storageID := utils.NewID()
+	zipPath := filepath.Join(uc.UploadDir, storageID+".zip")
+	extractPath := filepath.Join(uc.WorkDir, storageID)
 
 	if err := uc.Storage.Save(zipPath, input.File); err != nil {
 		return nil, err
@@ -59,7 +61,8 @@ func (uc *UploadProjectUseCase) Execute(
 
 	project := entities.NewProject(
 		input.Filename,
-		uniqueID,
+		slugify(input.Filename),
+		storageID,
 		"zip",
 		extractPath,
 	)
@@ -74,4 +77,15 @@ func (uc *UploadProjectUseCase) Execute(
 		ProjectID: projID,
 		UniqueKey: project.UniqueKey,
 	}, nil
+}
+
+func slugify(filename string) string {
+	s := strings.TrimSuffix(filename, filepath.Ext(filename))
+	s = strings.ToLower(s)
+	s = regexp.MustCompile(`[^a-z0-9-]+`).ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-")
+	if s == "" {
+		s = "app"
+	}
+	return s
 }

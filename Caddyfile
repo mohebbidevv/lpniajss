@@ -1,19 +1,11 @@
 {
-    # Caddy admin API — only accessible from localhost, never exposed
-    admin localhost:2019
+	admin localhost:2019
 }
 
-# your Go API
-api.launchpad.ir {
-    reverse_proxy localhost:5000
+*.localhost {
+	respond "app not found" 404
 }
 
-# wildcard — catches all subdomains like abc123.golaunch.dev
-# Caddy's dynamic routes (added via API) take priority over this
-*.launchpad.ir {
-    # wildcard TLS — Caddy handles the cert automatically
-    tls {
-        dns <your-dns-provider>  # needed for wildcard certs
-    }
-    respond "app not found" 404
+localhost {
+	respond "Hello from Caddy on localhost!" 200
 }

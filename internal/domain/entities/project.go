@@ -1,83 +1,61 @@
 package entities
 
-import (
-	"errors"
-	"time"
-)
+import "time"
 
 type ProjectStatus string
 
-var (
+const (
 	StatusPending  ProjectStatus = "pending"
 	StatusBuilding ProjectStatus = "building"
 	StatusRunning  ProjectStatus = "running"
-	StatusFailed   ProjectStatus = "failed"
 	StatusStopped  ProjectStatus = "stopped"
+	StatusFailed   ProjectStatus = "failed"
 )
 
 type Project struct {
-	// ID            int64          // Database ID (BIGSERIAL)
-	ID string
-	// UserID        string          // Foreign key to users table
-	Name           string        // User-given name for the project
-	UniqueKey      string        // Short, unique identifier for URLs (e.g., "a1b2c3d4")
-	SourceType     string        // e.g., "zip", "git_repo"
-	SourceLocation string        // Path on disk, URL, etc.
-	Status         ProjectStatus // Current status of the project
-	Port           int           // Port the project is running on
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	DeployedAt     *time.Time
+	ID             string
+	Name           string // original uploaded filename
+	Slug           string // public subdomain
+	UniqueKey      string // internal ID
+	SourceType     string // "zip" for now, room for "git" later
+	SourceLocation string
+	Status         ProjectStatus
+	Port           int // legacy — host-exec runtime only. Docker runtime won't use this once on the shared network.
+
+	CurrentDeploymentID *string // NEW — FK to the deployment currently live for this project, nil if never deployed
+
+	RepoURL *string // set only for SourceType "git" — the origin to re-sync from on every deploy
+	RepoRef *string // branch/tag to track; nil means "the remote's default branch"
+
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
-type Settings map[string]any
-
-type ProjectWithSetting struct {
-	Project  *Project
-	Settings Settings
-}
-
-// Simple Validation
-
-func (p *Project) Validate() error {
-	// if p.UserID <= "" {
-	// 	return errors.New("project must belong to a valid user")
-	// }
-	if p.Name == "" {
-		return errors.New("project name cannot be empty")
-	}
-	if p.UniqueKey == "" {
-		return errors.New("project unique key cannot be empty")
-	}
-	if p.SourceLocation == "" {
-		return errors.New("project source location cannot be empty")
-	}
-	if !isValidStatus(p.Status) {
-		return errors.New("invalid project status")
-	}
-	return nil
-}
-
-func isValidStatus(status ProjectStatus) bool {
-	switch status {
-	case StatusPending, StatusBuilding, StatusRunning, StatusFailed, StatusStopped:
-		return true
-	default:
-		return false
-	}
-}
-
-func NewProject(name, uniqueKey, sourceType, sourceLocation string) *Project {
-	now := time.Now()
+// NewProject constructs a project in its initial pending state.
+// slug should already be validated/uniqued by the caller before this is called.
+func NewProject(name, slug, uniqueKey, sourceType, sourceLocation string) *Project {
 	return &Project{
 		Name:           name,
+		Slug:           slug,
 		UniqueKey:      uniqueKey,
 		SourceType:     sourceType,
 		SourceLocation: sourceLocation,
-		Status:         StatusPending, // Default status
-		Port:           0,             // Default port
-		CreatedAt:      now,
-		UpdatedAt:      now,
-		DeployedAt:     nil,
+		Status:         StatusPending,
+	}
+}
+
+// NewGitProject constructs a project whose source is a git repo. sourceLocation
+// is the local directory it's cloned into (or will be cloned into); repoURL/ref
+// are kept so DeployPipeline can re-sync from origin on every subsequent deploy.
+func NewGitProject(name, slug, uniqueKey, sourceLocation, repoURL string, ref *string) *Project {
+	return &Project{
+		Name:           name,
+		Slug:           slug,
+		UniqueKey:      uniqueKey,
+		SourceType:     "git",
+		SourceLocation: sourceLocation,
+		Status:         StatusPending,
+		RepoURL:        &repoURL,
+		RepoRef:        ref,
 	}
 }

@@ -1,0 +1,2 @@
+ALTER TABLE projects DROP COLUMN IF EXISTS repo_ref;
+ALTER TABLE projects DROP COLUMN IF EXISTS repo_url;

@@ -52,6 +52,10 @@ type ProjectRepository interface {
 	GetByID(ctx context.Context, id string) (*entities.Project, error)
 	UpdateStatus(ctx context.Context, id string, status entities.ProjectStatus) error
 	UpdatePortAndStatus(ctx context.Context, id string, port int, status entities.ProjectStatus) error
+	ListByStatus(ctx context.Context, status entities.ProjectStatus) ([]*entities.Project, error)
+	GetBySlug(ctx context.Context, slug string) (*entities.Project, error)
+	SlugExists(ctx context.Context, slug string) (bool, error)
+	SetCurrentDeployment(ctx context.Context, projectID string, deploymentID string) error
 }
 
 // User represents a user in the domain (minimal for now).

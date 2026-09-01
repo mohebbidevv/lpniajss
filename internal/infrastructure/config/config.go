@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"golaunch/internal/infrastructure/utils"
+	"os"
+	"path/filepath"
 )
 
 type AppConfig struct {
@@ -24,7 +26,14 @@ type DBConfig struct {
 }
 
 func LoadConfig() (AppConfig, error) {
-	cfg, err := utils.OpenJSON[AppConfig]("cmd/configuration.json")
+	cwd, err := os.Getwd()
+	if err != nil {
+		return AppConfig{}, fmt.Errorf("failed to get current working directory: %w", err)
+	}
+
+	configPath := filepath.Join(cwd, "cmd/configuration.json")
+	
+	cfg, err := utils.OpenJSON[AppConfig](configPath)
 	if err != nil {
 		return AppConfig{}, err
 	}
