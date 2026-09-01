@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"golaunch/internal/domain/entities"
+	"golaunch/internal/infrastructure/nodedetect"
 	"golaunch/internal/infrastructure/utils"
 )
 
@@ -74,7 +75,7 @@ func (r *HostExecRuntime) all() []*TrackedProcess {
 // instead.
 func (r *HostExecRuntime) Start(ctx context.Context, spec entities.RuntimeSpec) (entities.RuntimeHandle, error) {
 	path := spec.ImageRef
-	projSpec := GetProjectSpecs(path, spec.Port)
+	projSpec := nodedetect.GetProjectSpecs(path, spec.Port)
 
 	name := projSpec.StartCmd[0]
 	args := projSpec.StartCmd[1:]

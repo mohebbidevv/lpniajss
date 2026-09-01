@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"golaunch/internal/domain/entities"
+	"golaunch/internal/infrastructure/nodedetect"
 )
 
 // HostExecImageBuilder implements repository.ImageBuilder for the host-exec
@@ -23,7 +24,7 @@ func NewHostExecImageBuilder() *HostExecImageBuilder {
 }
 
 func (b *HostExecImageBuilder) Build(ctx context.Context, req entities.BuildRequest, logSink func(entities.LogLine)) (string, error) {
-	specs := GetProjectSpecs(req.SourceDir, 0) // port doesn't affect install/build commands
+	specs := nodedetect.GetProjectSpecs(req.SourceDir, 0) // port doesn't affect install/build commands
 
 	logSink(entities.LogLine{Stream: entities.LogInfo, Text: "running npm install..."})
 	if err := runStreamed(ctx, req.SourceDir, os.Environ(), specs.InstallCmd, logSink); err != nil {
