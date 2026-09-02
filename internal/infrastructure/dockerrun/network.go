@@ -13,10 +13,12 @@ import (
 // at boot, before any deploy: a container create against a missing network
 // fails, and every app container joins this one.
 //
-// ICC is disabled, so containers on the network cannot reach each other —
-// only Caddy, which initiates the connection, can reach them. That turns a
-// single compromised tenant app into a dead end instead of a foothold on
-// every other app on the box.
+// ICC stays enabled, and that is a constraint rather than a preference.
+// Docker's enable_icc=false installs a blanket DROP for traffic forwarded
+// between containers on the bridge, which blocks the proxy from reaching an
+// app just as surely as it blocks one app reaching another. Isolating
+// tenants from each other needs a network per deployment with the proxy
+// attached to each, not a flag on a shared one.
 func EnsureNetwork(ctx context.Context, cli *client.Client, name string) error {
 	if name == "" {
 		name = DefaultNetwork
@@ -30,9 +32,6 @@ func EnsureNetwork(ctx context.Context, cli *client.Client, name string) error {
 
 	_, err := cli.NetworkCreate(ctx, name, network.CreateOptions{
 		Driver: "bridge",
-		Options: map[string]string{
-			"com.docker.network.bridge.enable_icc": "false",
-		},
 		Labels: map[string]string{labelManaged: managedValue},
 	})
 	// a concurrent creator winning the race is a success, not a failure

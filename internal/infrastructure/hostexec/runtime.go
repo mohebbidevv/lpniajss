@@ -75,13 +75,25 @@ func (r *HostExecRuntime) all() []*TrackedProcess {
 // instead.
 func (r *HostExecRuntime) Start(ctx context.Context, spec entities.RuntimeSpec) (entities.RuntimeHandle, error) {
 	path := spec.ImageRef
-	projSpec := nodedetect.GetProjectSpecs(path, spec.Port)
+
+	// the port is the runtime's to choose: nothing above this layer knows
+	// or needs to know which host port a process ended up on
+	port := spec.Port
+	if port == 0 {
+		allocated, err := allocatePort()
+		if err != nil {
+			return "", err
+		}
+		port = allocated
+	}
+
+	projSpec := nodedetect.GetProjectSpecs(path, port)
 
 	name := projSpec.StartCmd[0]
 	args := projSpec.StartCmd[1:]
 	cmd := exec.Command(name, args...)
 	cmd.Dir = path
-	cmd.Env = spec.Env
+	cmd.Env = append(mergeEnv(spec.Env), fmt.Sprintf("PORT=%d", port))
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdout, err := cmd.StdoutPipe()
@@ -94,7 +106,7 @@ func (r *HostExecRuntime) Start(ctx context.Context, spec entities.RuntimeSpec) 
 	}
 
 	handle := entities.RuntimeHandle(utils.NewID())
-	tp := NewTrackedProcess(string(handle), cmd, spec.Labels)
+	tp := NewTrackedProcess(string(handle), cmd, spec.Labels, port)
 
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("start process: %w", err)

@@ -20,6 +20,7 @@ type TrackedProcess struct {
 	Handle string
 	Cmd    *exec.Cmd
 	Labels map[string]string
+	Port   int
 
 	mu            sync.Mutex
 	status        ProcessStatus
@@ -32,11 +33,12 @@ type TrackedProcess struct {
 	logSubs map[string]chan entities.LogLine
 }
 
-func NewTrackedProcess(handle string, cmd *exec.Cmd, labels map[string]string) *TrackedProcess {
+func NewTrackedProcess(handle string, cmd *exec.Cmd, labels map[string]string, port int) *TrackedProcess {
 	return &TrackedProcess{
 		Handle:  handle,
 		Cmd:     cmd,
 		Labels:  labels,
+		Port:    port,
 		status:  StatusRunning,
 		done:    make(chan struct{}),
 		logSubs: make(map[string]chan entities.LogLine),

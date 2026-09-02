@@ -13,11 +13,28 @@ const (
 	DefaultContainerPort = 3000
 )
 
+// EndpointMode selects how a running container is addressed, which depends
+// entirely on where the reverse proxy runs.
+type EndpointMode string
+
+const (
+	// EndpointIP returns the container's address on the edge network. The
+	// host routes to the bridge subnet directly, so this is what a proxy
+	// running on the host must use — container names only resolve through
+	// Docker's embedded DNS, which is reachable from inside a container.
+	EndpointIP EndpointMode = "ip"
+
+	// EndpointDNS returns the container name, for a proxy that is itself a
+	// container on the edge network.
+	EndpointDNS EndpointMode = "dns"
+)
+
 // Config is the deployment-wide policy for containers this runtime creates.
 // Nothing here is per-project; per-project knobs travel on entities.RuntimeSpec.
 type Config struct {
 	Network       string
 	ContainerPort int
+	EndpointMode  EndpointMode
 
 	// DefaultLimits fills in any zero field of RuntimeSpec.Limits, so a spec
 	// that specifies nothing still lands inside a cgroup.
@@ -38,6 +55,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.ContainerPort == 0 {
 		c.ContainerPort = DefaultContainerPort
+	}
+	if c.EndpointMode == "" {
+		c.EndpointMode = EndpointIP
 	}
 	if c.DefaultLimits.MemoryMB == 0 {
 		c.DefaultLimits.MemoryMB = 512

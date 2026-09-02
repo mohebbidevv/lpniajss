@@ -41,9 +41,16 @@ func (r *DockerRuntime) translate(spec entities.RuntimeSpec) (*container.Config,
 	pids := limits.PidsLimit
 	useInit := true
 
+	// PORT last so it wins: which port the app listens on is the runtime's
+	// decision, not the caller's. Copied rather than appended in place so
+	// the caller's slice is never aliased.
+	env := make([]string, 0, len(spec.Env)+1)
+	env = append(env, spec.Env...)
+	env = append(env, fmt.Sprintf("PORT=%d", port))
+
 	cfg := &container.Config{
 		Image:        spec.ImageRef,
-		Env:          spec.Env,
+		Env:          env,
 		Labels:       encodeLabels(spec.Labels),
 		ExposedPorts: nat.PortSet{exposed: struct{}{}},
 	}

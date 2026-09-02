@@ -6,7 +6,6 @@ import (
 	"golaunch/internal/infrastructure/caddy"
 	"golaunch/internal/infrastructure/config"
 	"golaunch/internal/infrastructure/database/postgres"
-	"golaunch/internal/infrastructure/hostexec"
 	packageHttp "golaunch/internal/infrastructure/http"
 	middleware "golaunch/internal/infrastructure/http/middlewares"
 	"golaunch/internal/infrastructure/vcsgit"
@@ -34,7 +33,7 @@ func main() {
 
 	configuration, err := config.LoadConfig()
 	if err != nil {
-		panic(err)
+		log.Fatalf("config: %v", err)
 	}
 
 	dbDSN := postgres.BuildDSN(configuration.DB)
@@ -58,16 +57,24 @@ func main() {
 	dbRepo := postgres.NewProjectRepository(dbPool)
 	deploymentRepo := postgres.NewDeploymentRepository(dbPool)
 
-	caddyClient := caddy.NewCaddyClient("http://localhost:2019", "localhost")
+	caddyClient := caddy.NewCaddyClient(configuration.Caddy.AdminURL, configuration.Caddy.Domain)
 
-	// host-exec runtime today; a Docker implementation of repository.Runtime
-	// and repository.ImageBuilder is a drop-in swap here later — nothing
-	// above the wiring in main.go needs to change.
-	hostRuntime := hostexec.NewHostExecRuntime()
-	hostBuilder := hostexec.NewHostExecImageBuilder()
+	stack, err := buildDeployStack(ctx, configuration.Runtime)
+	if err != nil {
+		log.Fatalf("runtime %q unavailable: %v", configuration.Runtime.Driver, err)
+	}
+	if stack.Closer != nil {
+		defer stack.Closer.Close()
+	}
+	log.Printf("runtime driver: %s", configuration.Runtime.Driver)
+
 	gitSource := vcsgit.NewGitSource()
 
-	pipeline := application.NewDeployPipeline(dbRepo, deploymentRepo, hostRuntime, hostBuilder, gitSource, caddyClient, registry)
+	pipeline := application.NewDeployPipeline(
+		dbRepo, deploymentRepo, stack.Runtime, stack.Builder,
+		gitSource, caddyClient, registry,
+		deployConfig(configuration.Runtime),
+	)
 
 	var eventConsumer *application.EventConsumer
 
@@ -91,13 +98,13 @@ func main() {
 	workerPool.Start()
 	defer workerPool.ShutDown()
 
-	eventConsumer = application.NewEventConsumer(dbRepo, deploymentRepo, hostRuntime, caddyClient, workerPool)
+	eventConsumer = application.NewEventConsumer(dbRepo, deploymentRepo, stack.Runtime, caddyClient, workerPool)
 	go eventConsumer.Run(ctx)
 
-	reconciler := application.NewReconciler(deploymentRepo, hostRuntime, caddyClient, pipeline)
+	reconciler := application.NewReconciler(deploymentRepo, stack.Runtime, caddyClient, pipeline)
 	go reconciler.Run(ctx)
 
-	packageHttp.InitializeRoutes(ctx, dbPool, workerPool, caddyClient, registry, hostRuntime, mux)
+	packageHttp.InitializeRoutes(ctx, dbPool, workerPool, caddyClient, registry, stack.Runtime, mux)
 	server := &nethttp.Server{
 		Addr:    ":" + configuration.Server.Port,
 		Handler: handler,

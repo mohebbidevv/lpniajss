@@ -84,9 +84,24 @@ func GenerateDockerfile(specs *nodedetect.ProjectSpecs) string {
 	// with the daemon-level userns remap rather than replacing it.
 	b.WriteString("USER node\n")
 	fmt.Fprintf(&b, "EXPOSE %d\n", ContainerPort)
+	writeHealthcheck(&b)
 	fmt.Fprintf(&b, "CMD %s\n", execForm(specs.StartCmd))
 
 	return b.String()
+}
+
+// writeHealthcheck gives the runtime a real readiness signal, so a deploy
+// only flips traffic once the app is actually accepting connections. Any
+// HTTP response counts — a 404 still proves the server is listening, which
+// is the question being asked. node -e rather than curl: the slim images
+// ship neither curl nor wget.
+func writeHealthcheck(b *strings.Builder) {
+	probe := fmt.Sprintf(
+		"require('http').get('http://127.0.0.1:%d/',()=>process.exit(0)).on('error',()=>process.exit(1))",
+		ContainerPort,
+	)
+	fmt.Fprintf(b, "HEALTHCHECK --interval=1s --timeout=3s --start-period=2s --retries=60 CMD %s\n",
+		execForm([]string{"node", "-e", probe}))
 }
 
 // writeCorepack enables the Node-bundled shim manager for pnpm and yarn.

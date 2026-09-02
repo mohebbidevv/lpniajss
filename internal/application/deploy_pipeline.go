@@ -3,27 +3,38 @@ package application
 import (
 	"context"
 	"fmt"
-	"os"
-	"strconv"
-	"sync/atomic"
+	"time"
 
 	"golaunch/internal/domain/entities"
 	"golaunch/internal/domain/repository"
 	"golaunch/internal/infrastructure/caddy"
 )
 
-// port counter — starts at 3000, increments per deployment
-var portCounter atomic.Int32
-
-func init() {
-	portCounter.Store(3000)
-}
-
-func nextPort() int {
-	return int(portCounter.Add(1))
-}
-
 const stopTimeoutSeconds = 10
+
+const (
+	defaultBuildTimeout = 15 * time.Minute
+	defaultReadyTimeout = 90 * time.Second
+)
+
+// DeployConfig is the resource and timing policy for a deploy. Zero fields
+// fall back to platform defaults, so an empty value is usable.
+type DeployConfig struct {
+	BuildTimeout time.Duration
+	BuildLimits  entities.ResourceLimits
+	AppLimits    entities.ResourceLimits
+	ReadyTimeout time.Duration
+}
+
+func (c DeployConfig) withDefaults() DeployConfig {
+	if c.BuildTimeout == 0 {
+		c.BuildTimeout = defaultBuildTimeout
+	}
+	if c.ReadyTimeout == 0 {
+		c.ReadyTimeout = defaultReadyTimeout
+	}
+	return c
+}
 
 // DeployPipeline owns the whole build-and-flip sequence for a project. It
 // talks only to repository.Runtime / repository.ImageBuilder — never to a
@@ -37,6 +48,7 @@ type DeployPipeline struct {
 	GitSource      repository.GitSource
 	Caddy          *caddy.CaddyClient
 	Registry       *LogRegistry
+	Config         DeployConfig
 }
 
 func NewDeployPipeline(
@@ -47,6 +59,7 @@ func NewDeployPipeline(
 	gitSource repository.GitSource,
 	caddyClient *caddy.CaddyClient,
 	registry *LogRegistry,
+	cfg DeployConfig,
 ) *DeployPipeline {
 	return &DeployPipeline{
 		ProjectRepo:    projectRepo,
@@ -56,6 +69,7 @@ func NewDeployPipeline(
 		GitSource:      gitSource,
 		Caddy:          caddyClient,
 		Registry:       registry,
+		Config:         cfg.withDefaults(),
 	}
 }
 
@@ -112,8 +126,6 @@ func (p *DeployPipeline) Deploy(ctx context.Context, projectID string) error {
 		_ = p.ProjectRepo.UpdateStatus(ctx, project.ID, entities.StatusBuilding)
 	}
 
-	port := nextPort()
-
 	logSink := func(line entities.LogLine) {
 		p.streamLog(ctx, projectID, LogLine{Stream: string(line.Stream), Text: line.Text})
 	}
@@ -122,16 +134,14 @@ func (p *DeployPipeline) Deploy(ctx context.Context, projectID string) error {
 		"project_id":    project.ID,
 		"deployment_id": deployment.ID,
 		"slug":          project.Slug,
-		// Deployment.Port isn't currently persisted by the postgres repo's
-		// Create, so reconcile reads the port back from here rather than
-		// from the DB row.
-		"port": strconv.Itoa(port),
 	}
 
 	imageRef, err := p.Builder.Build(ctx, entities.BuildRequest{
 		ProjectID: project.ID,
 		SourceDir: sourceRoot,
 		ImageTag:  fmt.Sprintf("%s-%s", project.Slug, deployment.ID),
+		Timeout:   int(p.Config.BuildTimeout.Seconds()),
+		Limits:    p.Config.BuildLimits,
 	}, logSink)
 	if err != nil {
 		return p.fail(ctx, project.ID, deployment.ID, previous, fmt.Sprintf("build failed: %v", err))
@@ -142,8 +152,8 @@ func (p *DeployPipeline) Deploy(ctx context.Context, projectID string) error {
 		ProjectID:    project.ID,
 		Slug:         project.Slug,
 		ImageRef:     imageRef,
-		Port:         port,
-		Env:          append(os.Environ(), fmt.Sprintf("PORT=%d", port)),
+		Env:          appEnv(),
+		Limits:       p.Config.AppLimits,
 		Labels:       labels,
 	}
 
@@ -157,14 +167,29 @@ func (p *DeployPipeline) Deploy(ctx context.Context, projectID string) error {
 		return fmt.Errorf("record container info: %w", err)
 	}
 
+	// Start only means the process was launched. Flipping traffic before
+	// the app is listening would serve errors for the first seconds of
+	// every deploy, so the readiness gate comes first.
+	p.streamLog(ctx, projectID, LogLine{Stream: "info", Text: "waiting for the app to start serving..."})
+	if err := p.Runtime.WaitReady(ctx, handle, p.Config.ReadyTimeout); err != nil {
+		p.discard(ctx, handle)
+		return p.fail(ctx, project.ID, deployment.ID, previous, fmt.Sprintf("app never became ready: %v", err))
+	}
+
+	// only the runtime knows how its instances are addressed
+	upstream, err := p.Runtime.Endpoint(ctx, handle)
+	if err != nil {
+		p.discard(ctx, handle)
+		return p.fail(ctx, project.ID, deployment.ID, previous, fmt.Sprintf("resolve endpoint failed: %v", err))
+	}
+
 	// flip the route to the new deployment. RegisterRoute replaces any
 	// existing route for this hostname, so this alone is what makes the
 	// new version live — no separate "remove old route" step is needed.
-	if err := p.Caddy.RegisterRoute(project.Slug, fmt.Sprintf("localhost:%d", port)); err != nil {
+	if err := p.Caddy.RegisterRoute(project.Slug, upstream); err != nil {
 		// the new instance is up but unreachable — treat as a failed deploy
 		// and clean it up. The previous deployment's route is untouched.
-		_ = p.Runtime.Stop(ctx, handle, stopTimeoutSeconds)
-		_ = p.Runtime.Remove(ctx, handle)
+		p.discard(ctx, handle)
 		return p.fail(ctx, project.ID, deployment.ID, previous, fmt.Sprintf("register route failed: %v", err))
 	}
 
@@ -197,6 +222,13 @@ func (p *DeployPipeline) Deploy(ctx context.Context, projectID string) error {
 	}
 
 	return nil
+}
+
+// discard tears down an instance that was started but never went live. The
+// previous deployment and its route are untouched.
+func (p *DeployPipeline) discard(ctx context.Context, handle entities.RuntimeHandle) {
+	_ = p.Runtime.Stop(ctx, handle, stopTimeoutSeconds)
+	_ = p.Runtime.Remove(ctx, handle)
 }
 
 // fail marks the new deployment failed and leaves the previous deployment

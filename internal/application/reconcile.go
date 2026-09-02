@@ -2,7 +2,6 @@ package application
 
 import (
 	"context"
-	"fmt"
 	"log"
 
 	"golaunch/internal/domain/entities"
@@ -72,12 +71,16 @@ func (r *Reconciler) Run(ctx context.Context) {
 		}
 
 		slug := inst.Labels["slug"]
-		port := inst.Labels["port"]
-		if slug == "" || port == "" {
-			log.Printf("[reconcile] deployment %s missing slug/port labels, cannot verify route", d.ID)
+		if slug == "" {
+			log.Printf("[reconcile] deployment %s missing slug label, cannot verify route", d.ID)
 			continue
 		}
-		if err := r.Caddy.RegisterRoute(slug, fmt.Sprintf("localhost:%s", port)); err != nil {
+		upstream, err := r.Runtime.Endpoint(ctx, inst.Handle)
+		if err != nil {
+			log.Printf("[reconcile] cannot resolve endpoint for deployment %s: %v", d.ID, err)
+			continue
+		}
+		if err := r.Caddy.RegisterRoute(slug, upstream); err != nil {
 			log.Printf("[reconcile] failed to ensure route for %s: %v", slug, err)
 		}
 	}

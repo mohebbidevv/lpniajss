@@ -207,3 +207,34 @@ func TestEventBookmarkIsSecondsDotNanos(t *testing.T) {
 		t.Errorf("nanosecond carry = %q, want 2.000000000", got)
 	}
 }
+
+func TestTranslateInjectsPortWithoutAliasingCallerEnv(t *testing.T) {
+	r := newTestRuntime()
+	callerEnv := []string{"NODE_ENV=production"}
+
+	cfg, _, _ := r.translate(entities.RuntimeSpec{DeploymentID: "dep-5", Env: callerEnv})
+
+	if len(callerEnv) != 1 {
+		t.Errorf("caller env was mutated: %v", callerEnv)
+	}
+	var found bool
+	for _, e := range cfg.Env {
+		if e == "PORT=3000" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("env = %v, want a PORT entry", cfg.Env)
+	}
+}
+
+func TestTranslateDoesNotLeakHostEnvironment(t *testing.T) {
+	r := newTestRuntime()
+
+	cfg, _, _ := r.translate(entities.RuntimeSpec{DeploymentID: "dep-6"})
+
+	// only what the caller passed plus the runtime's own PORT
+	if len(cfg.Env) != 1 || cfg.Env[0] != "PORT=3000" {
+		t.Errorf("env = %v, want exactly [PORT=3000]", cfg.Env)
+	}
+}

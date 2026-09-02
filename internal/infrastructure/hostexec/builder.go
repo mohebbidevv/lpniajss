@@ -27,13 +27,13 @@ func (b *HostExecImageBuilder) Build(ctx context.Context, req entities.BuildRequ
 	specs := nodedetect.GetProjectSpecs(req.SourceDir, 0) // port doesn't affect install/build commands
 
 	logSink(entities.LogLine{Stream: entities.LogInfo, Text: "running npm install..."})
-	if err := runStreamed(ctx, req.SourceDir, os.Environ(), specs.InstallCmd, logSink); err != nil {
+	if err := runStreamed(ctx, req.SourceDir, buildEnv(), specs.InstallCmd, logSink); err != nil {
 		return "", fmt.Errorf("install failed: %w", err)
 	}
 
 	if len(specs.BuildCmd) > 0 {
 		logSink(entities.LogLine{Stream: entities.LogInfo, Text: "building..."})
-		if err := runStreamed(ctx, req.SourceDir, os.Environ(), specs.BuildCmd, logSink); err != nil {
+		if err := runStreamed(ctx, req.SourceDir, buildEnv(), specs.BuildCmd, logSink); err != nil {
 			return "", fmt.Errorf("build failed: %w", err)
 		}
 	}

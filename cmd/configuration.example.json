@@ -1,0 +1,30 @@
+{
+    "server": {
+        "port": "5000"
+    },
+    "db": {
+        "host": "127.0.0.1",
+        "port": 55432,
+        "name": "golaunch",
+        "user": "postgres",
+        "password": "change-me",
+        "ssl_mode": "disable"
+    },
+    "caddy": {
+        "admin_url": "http://localhost:2019",
+        "domain": "localhost"
+    },
+    "runtime": {
+        "driver": "docker",
+        "network": "golaunch-edge",
+        "container_port": 3000,
+        "endpoint_mode": "ip",
+        "memory_mb": 512,
+        "cpu_cores": 1,
+        "pids_limit": 256,
+        "build_timeout_seconds": 900,
+        "build_memory_mb": 2048,
+        "build_cpu_cores": 2,
+        "ready_timeout_seconds": 90
+    }
+}
