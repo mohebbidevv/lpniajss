@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"golaunch/internal/application"
+	middleware "golaunch/internal/infrastructure/http/middlewares"
 	"net/http"
 )
 
@@ -39,12 +40,26 @@ func (handler *ImportGithubHandler) ServeHTTP(
 		return
 	}
 
+	// anonymous is allowed here — see upload_handler.go for why.
+	var userID string
+	if user, ok := middleware.UserFromContext(r.Context()); ok {
+		userID = user.ID
+	}
+
 	result, err := handler.ImportUseCase.Execute(ctx, application.ImportGithubInput{
+		UserID:  userID,
 		RepoURL: req.RepoURL,
 		Ref:     req.Ref,
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		status := http.StatusBadRequest
+		switch {
+		case isConflict(err):
+			status = http.StatusConflict
+		case isLimitReached(err):
+			status = http.StatusForbidden
+		}
+		respondError(w, err, status)
 		return
 	}
 

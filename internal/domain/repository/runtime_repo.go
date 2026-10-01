@@ -25,6 +25,11 @@ type Runtime interface {
 	// errors while the app is still booting.
 	WaitReady(ctx context.Context, handle entities.RuntimeHandle, timeout time.Duration) error
 
+	// Ping reports whether the runtime backend is reachable. Readiness
+	// probes call it; nothing on the deploy path does, so an implementation
+	// with no daemon behind it should simply return nil.
+	Ping(ctx context.Context) error
+
 	Logs(ctx context.Context, handle entities.RuntimeHandle, opts entities.LogOptions) (<-chan entities.LogLine, error)
 	List(ctx context.Context, labelFilter map[string]string) ([]entities.RuntimeInstance, error)
 	Events(ctx context.Context) (<-chan entities.RuntimeEvent, error)

@@ -238,3 +238,38 @@ func TestTranslateDoesNotLeakHostEnvironment(t *testing.T) {
 		t.Errorf("env = %v, want exactly [PORT=3000]", cfg.Env)
 	}
 }
+
+func TestTranslateSetsNoNprocUlimit(t *testing.T) {
+	r := newTestRuntime()
+
+	_, hostCfg, _ := r.translate(entities.RuntimeSpec{
+		DeploymentID: "dep-nproc",
+		Limits:       entities.ResourceLimits{PidsLimit: 64},
+	})
+
+	// RLIMIT_NPROC is enforced per-UID host-wide, not per-container. Every
+	// container here runs as UID 1000, which on a normal single-user Linux
+	// box is also the host user's own login UID — so an nproc ulimit counts
+	// their desktop's processes and the container can't exec even its first
+	// process ("resource temporarily unavailable" on /sbin/docker-init).
+	// PidsLimit below is the correctly-scoped control; do not add nproc back.
+	for _, u := range hostCfg.Ulimits {
+		if u.Name == "nproc" {
+			t.Fatalf("nproc ulimit must not be set — it breaks container startup entirely, got %+v", u)
+		}
+	}
+
+	if hostCfg.PidsLimit == nil || *hostCfg.PidsLimit != 64 {
+		t.Errorf("the pids cgroup is what actually caps process count, got %v", hostCfg.PidsLimit)
+	}
+
+	var hasNofile bool
+	for _, u := range hostCfg.Ulimits {
+		if u.Name == "nofile" {
+			hasNofile = true
+		}
+	}
+	if !hasNofile {
+		t.Error("nofile is per-process and correct — it should still be set")
+	}
+}

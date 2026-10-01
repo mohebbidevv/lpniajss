@@ -36,10 +36,13 @@ func NewStopProjectUseCase(
 // FIRST, before anything actually happens to the runtime — that's what
 // tells EventConsumer the coming death event was intentional rather than a
 // crash, so ordering here matters as much as in DeployPipeline.
-func (uc *StopProjectUseCase) Execute(ctx context.Context, projectID string) error {
+func (uc *StopProjectUseCase) Execute(ctx context.Context, projectID, userID string) error {
 	project, err := uc.ProjectRepo.GetByID(ctx, projectID)
 	if err != nil {
 		return fmt.Errorf("project not found: %w", err)
+	}
+	if err := mustOwnProject(project, userID); err != nil {
+		return err
 	}
 
 	if project.CurrentDeploymentID == nil {
@@ -55,7 +58,7 @@ func (uc *StopProjectUseCase) Execute(ctx context.Context, projectID string) err
 		return fmt.Errorf("mark deployment stopped: %w", err)
 	}
 
-	if err := uc.Caddy.RemoveRoute(project.Slug); err != nil {
+	if err := uc.Caddy.RemoveRoute(project.ID); err != nil {
 		return fmt.Errorf("remove caddy route: %w", err)
 	}
 

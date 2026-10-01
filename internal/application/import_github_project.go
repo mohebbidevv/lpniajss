@@ -19,6 +19,7 @@ import (
 var githubRepoURLPattern = regexp.MustCompile(`^https://github\.com/([\w.-]+)/([\w.-]+?)(\.git)?$`)
 
 type ImportGithubInput struct {
+	UserID  string
 	RepoURL string
 	Ref     string // "" = the remote's default branch
 }
@@ -51,7 +52,22 @@ func (uc *ImportGithubProjectUseCase) Execute(ctx context.Context, input ImportG
 	if match == nil {
 		return nil, fmt.Errorf("repo url must look like https://github.com/<owner>/<repo>")
 	}
+
+	// only an already-logged-in submission has an owner to count against;
+	// an anonymous one is checked later, at claim time
+	if input.UserID != "" {
+		if err := enforceProjectLimit(ctx, uc.ProjectRepo, input.UserID); err != nil {
+			return nil, err
+		}
+	}
+
 	owner, repo := match[1], match[2]
+	name := fmt.Sprintf("%s/%s", owner, repo)
+
+	slug, err := uniqueSlug(ctx, uc.ProjectRepo, slugify(name))
+	if err != nil {
+		return nil, err
+	}
 
 	storageID := utils.NewID()
 	destDir := filepath.Join(uc.WorkDir, storageID)
@@ -60,13 +76,12 @@ func (uc *ImportGithubProjectUseCase) Execute(ctx context.Context, input ImportG
 		return nil, fmt.Errorf("clone failed: %w", err)
 	}
 
-	name := fmt.Sprintf("%s/%s", owner, repo)
 	var ref *string
 	if input.Ref != "" {
 		ref = &input.Ref
 	}
 
-	project := entities.NewGitProject(name, slugify(name), storageID, destDir, input.RepoURL, ref)
+	project := entities.NewGitProject(input.UserID, name, slug, storageID, destDir, input.RepoURL, ref)
 
 	projID, err := uc.ProjectRepo.Create(ctx, project)
 	if err != nil {

@@ -182,6 +182,14 @@ func tarContext(root string, extraFiles map[string]string) (io.ReadCloser, error
 				return nil
 			}
 
+			// extraFiles is authoritative for any path it names — e.g. a
+			// lockfile rewritten to strip a private registry reference —
+			// so the real file on disk is skipped rather than shipping
+			// both and relying on tar's last-entry-wins extraction order
+			if _, overridden := extraFiles[rel]; overridden {
+				return nil
+			}
+
 			return writeTarEntry(tw, p, rel, d)
 		})
 

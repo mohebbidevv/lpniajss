@@ -2,6 +2,7 @@ package dockerbuild
 
 import (
 	"archive/tar"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -270,5 +271,152 @@ func TestStreamBuildOutputSplitsBatchedLines(t *testing.T) {
 	}
 	if lines[0].Text != "line one" || lines[2].Text != "line three" {
 		t.Errorf("unexpected line split: %+v", lines)
+	}
+}
+
+func TestStreamBuildOutputCollapsesPullProgress(t *testing.T) {
+	// a cold pull of a multi-layer image: each layer sends the same Status
+	// repeatedly as bytes arrive (only ProgressDetail changes, which this
+	// backend doesn't even parse), then moves to the next phase once.
+	var b strings.Builder
+	layers := []string{"aaa111", "bbb222", "ccc333"}
+	for _, id := range layers {
+		for i := 0; i < 50; i++ {
+			fmt.Fprintf(&b, `{"status":"Downloading","id":%q,"progressDetail":{"current":%d}}`+"\n", id, i)
+		}
+		fmt.Fprintf(&b, `{"status":"Pull complete","id":%q}`+"\n", id)
+	}
+
+	var lines []entities.LogLine
+	if err := streamBuildOutput(strings.NewReader(b.String()), func(l entities.LogLine) { lines = append(lines, l) }); err != nil {
+		t.Fatalf("streamBuildOutput: %v", err)
+	}
+
+	// 150 "Downloading" frames + 3 "Pull complete" frames per layer must
+	// collapse to exactly one line per phase per layer — 2 phases x 3
+	// layers = 6. Anything close to 153 means the flood is back.
+	if len(lines) != 6 {
+		t.Fatalf("got %d log lines from a collapsible pull, want 6: %+v", len(lines), lines)
+	}
+	if lines[0].Text != "aaa111: Downloading" || lines[1].Text != "aaa111: Pull complete" {
+		t.Errorf("unexpected collapsed output: %+v", lines)
+	}
+}
+
+// ── private registry rewriting ───────────────────────────────────────────
+
+func TestForcePublicRegistryRewritesPrivateNpmMirror(t *testing.T) {
+	lockfile := `{
+  "packages": {
+    "node_modules/zod-validation-error": {
+      "version": "4.0.2",
+      "resolved": "https://mirror-npm.runflare.com/zod-validation-error/-/zod-validation-error-4.0.2.tgz",
+      "integrity": "sha512-abc123"
+    }
+  }
+}`
+
+	out, changed := forcePublicRegistry(nodedetect.PackageManagerNPM, []byte(lockfile))
+	if !changed {
+		t.Fatal("a private mirror host must be reported as changed")
+	}
+	if strings.Contains(string(out), "mirror-npm.runflare.com") {
+		t.Error("the private mirror host must not survive the rewrite")
+	}
+	want := `"resolved": "https://registry.npmjs.org/zod-validation-error/-/zod-validation-error-4.0.2.tgz"`
+	if !strings.Contains(string(out), want) {
+		t.Errorf("rewritten lockfile missing %q, got:\n%s", want, out)
+	}
+	if !strings.Contains(string(out), `"integrity": "sha512-abc123"`) {
+		t.Error("the integrity hash must be left untouched — that's what makes the host swap safe")
+	}
+}
+
+func TestForcePublicRegistryLeavesLegitimateHostsAlone(t *testing.T) {
+	lockfile := `{"resolved": "https://registry.npmjs.org/foo/-/foo-1.0.0.tgz"}`
+
+	out, changed := forcePublicRegistry(nodedetect.PackageManagerNPM, []byte(lockfile))
+	if changed {
+		t.Error("an already-public registry URL must not be reported as changed")
+	}
+	if string(out) != lockfile {
+		t.Errorf("content must be byte-identical when nothing needs rewriting, got:\n%s", out)
+	}
+}
+
+func TestForcePublicRegistryRewritesYarnLockfile(t *testing.T) {
+	lockfile := "zod-validation-error@^4.0.0:\n" +
+		"  version \"4.0.2\"\n" +
+		"  resolved \"https://mirror-npm.runflare.com/zod-validation-error/-/zod-validation-error-4.0.2.tgz#abc123def456\"\n" +
+		"  integrity sha512-abc123\n"
+
+	out, changed := forcePublicRegistry(nodedetect.PackageManagerYarn, []byte(lockfile))
+	if !changed {
+		t.Fatal("a private mirror host in yarn.lock must be reported as changed")
+	}
+	want := `resolved "https://registry.npmjs.org/zod-validation-error/-/zod-validation-error-4.0.2.tgz#abc123def456"`
+	if !strings.Contains(string(out), want) {
+		t.Errorf("rewritten yarn.lock missing %q, got:\n%s", want, out)
+	}
+}
+
+func TestForcePublicRegistryLeavesYarnpkgMirrorAlone(t *testing.T) {
+	// registry.yarnpkg.com is Yarn's own free public mirror, not a private
+	// one — rewriting it would be pointless churn, not a fix.
+	lockfile := `resolved "https://registry.yarnpkg.com/foo/-/foo-1.0.0.tgz#abc123"`
+
+	out, changed := forcePublicRegistry(nodedetect.PackageManagerYarn, []byte(lockfile))
+	if changed {
+		t.Error("registry.yarnpkg.com must not be rewritten")
+	}
+	if string(out) != lockfile {
+		t.Errorf("content must be unchanged, got:\n%s", out)
+	}
+}
+
+func TestTarContextExtraFilesOverrideRealFile(t *testing.T) {
+	dir := writeFiles(t, map[string]string{
+		"package.json":      "{}",
+		"package-lock.json": `{"resolved": "https://mirror-npm.runflare.com/x.tgz"}`,
+	})
+
+	rc, err := tarContext(dir, map[string]string{
+		"package-lock.json": `{"resolved": "https://registry.npmjs.org/x.tgz"}`,
+	})
+	if err != nil {
+		t.Fatalf("tarContext: %v", err)
+	}
+	defer rc.Close()
+
+	var matches int
+	var content string
+	tr := tar.NewReader(rc)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read tar: %v", err)
+		}
+		if h.Name != "package-lock.json" {
+			continue
+		}
+		matches++
+		buf := make([]byte, h.Size)
+		if _, err := io.ReadFull(tr, buf); err != nil {
+			t.Fatalf("read entry content: %v", err)
+		}
+		content = string(buf)
+	}
+
+	if matches != 1 {
+		t.Fatalf("expected exactly one package-lock.json entry in the tar, got %d", matches)
+	}
+	if strings.Contains(content, "mirror-npm.runflare.com") {
+		t.Errorf("the real on-disk file must not win over the extraFiles override, got:\n%s", content)
+	}
+	if !strings.Contains(content, "registry.npmjs.org") {
+		t.Errorf("the tar must contain the rewritten content, got:\n%s", content)
 	}
 }

@@ -3,10 +3,18 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"golaunch/internal/application"
+	middleware "golaunch/internal/infrastructure/http/middlewares"
 	"net/http"
 	"strings"
 )
+
+// maxUploadBytes caps the request body. It is referenced by both the reader
+// and the error message so the limit and what we tell the user can't drift
+// apart.
+const maxUploadBytes = 20 << 20
 
 type UploadHandler struct {
 	UploadUseCase application.UploadProjectUseCase
@@ -24,14 +32,20 @@ func (handler *UploadHandler) ServeHTTP(
 		return
 	}
 
-	// max upload size
-	r.Body = http.MaxBytesReader(w, r.Body, 20<<20)
+	// MaxBytesReader, not a size check after the fact: this makes the
+	// server stop reading and close the connection once the cap is hit,
+	// instead of accepting the whole body and only then rejecting it.
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
 
 	// file validation
 	file, hdr, err := r.FormFile("file")
 	if err != nil {
-		if err.Error() == "http: too large body" {
-			http.Error(w, "file is too large (max 20MB)", http.StatusRequestEntityTooLarge)
+		// errors.As, not a string compare: MaxBytesReader reports
+		// *http.MaxBytesError and FormFile wraps it, so neither the type
+		// nor the message survives a == against a literal.
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			http.Error(w, fmt.Sprintf("file is too large (max %dMB)", maxUploadBytes>>20), http.StatusRequestEntityTooLarge)
 		} else {
 			http.Error(w, "missing file field (multipart form: file)", http.StatusBadRequest)
 		}
@@ -44,13 +58,31 @@ func (handler *UploadHandler) ServeHTTP(
 		return
 	}
 
+	// anonymous is allowed here — an unauthenticated upload is staged with
+	// no owner and picked up by /projects/{id}/claim right after signup.
+	// An already-logged-in caller (OptionalAuth resolved a user) owns it
+	// immediately instead.
+	var userID string
+	if user, ok := middleware.UserFromContext(r.Context()); ok {
+		userID = user.ID
+	}
+
 	uploadResult, err := handler.UploadUseCase.Execute(ctx, application.UploadInput{
+		UserID:   userID,
 		Filename: hdr.Filename,
 		File:     file,
 	})
 
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		status := http.StatusInternalServerError
+		switch {
+		case isConflict(err):
+			status = http.StatusConflict
+		case isLimitReached(err):
+			status = http.StatusForbidden
+		}
+		respondError(w, err, status)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")

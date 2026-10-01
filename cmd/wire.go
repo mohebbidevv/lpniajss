@@ -75,7 +75,24 @@ func deployConfig(cfg config.RuntimeConfig) application.DeployConfig {
 			MemoryMB: cfg.BuildMemoryMB,
 			CPUCores: cfg.BuildCPUCores,
 		},
-		AppLimits:    appLimits(cfg),
-		ReadyTimeout: time.Duration(cfg.ReadyTimeoutSeconds) * time.Second,
+		AppLimits:         appLimits(cfg),
+		ReadyTimeout:      time.Duration(cfg.ReadyTimeoutSeconds) * time.Second,
+		DataRoot:          cfg.DataRoot,
+		MinBuildDiskBytes: uint64(cfg.MinBuildDiskGB) << 30,
 	}
+}
+
+// jobSlack covers everything in DeployPipeline.Deploy that isn't bounded by
+// BuildTimeout or ReadyTimeout: git sync, Caddy route registration, and
+// tearing down the previous deployment. None of those have their own
+// timeout today, so the worker pool's ceiling is the only thing standing
+// between a hung git clone and a permanently stuck worker.
+const jobSlack = 5 * time.Minute
+
+// jobTimeoutFor sizes the worker pool's per-job ceiling to what a deploy
+// job can actually take, instead of a value picked independently of it. A
+// child context can never outlive its parent, so if this were smaller than
+// BuildTimeout, the configured build timeout would be silently unreachable.
+func jobTimeoutFor(dc application.DeployConfig) time.Duration {
+	return dc.BuildTimeout + dc.ReadyTimeout + jobSlack
 }

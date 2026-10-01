@@ -19,7 +19,7 @@ type UploadProjectUseCase struct {
 }
 
 type UploadInput struct {
-	// UserID   domain.UserID
+	UserID   string
 	File     io.Reader
 	Filename string
 }
@@ -47,6 +47,19 @@ func NewUploadProjectUseCase(
 func (uc *UploadProjectUseCase) Execute(
 	ctx context.Context, input UploadInput) (*UploadOutput, error) {
 
+	// only an already-logged-in submission has an owner to count against;
+	// an anonymous one is checked later, at claim time
+	if input.UserID != "" {
+		if err := enforceProjectLimit(ctx, uc.ProjectRepo, input.UserID); err != nil {
+			return nil, err
+		}
+	}
+
+	slug, err := uniqueSlug(ctx, uc.ProjectRepo, slugify(input.Filename))
+	if err != nil {
+		return nil, err
+	}
+
 	storageID := utils.NewID()
 	zipPath := filepath.Join(uc.UploadDir, storageID+".zip")
 	extractPath := filepath.Join(uc.WorkDir, storageID)
@@ -60,8 +73,9 @@ func (uc *UploadProjectUseCase) Execute(
 	}
 
 	project := entities.NewProject(
+		input.UserID,
 		input.Filename,
-		slugify(input.Filename),
+		slug,
 		storageID,
 		"zip",
 		extractPath,

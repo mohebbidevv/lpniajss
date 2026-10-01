@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"golaunch/internal/application"
+	middleware "golaunch/internal/infrastructure/http/middlewares"
 	"net/http"
 	"strings"
 )
@@ -28,12 +29,18 @@ func (h *StopHandler) ServeHTTP(ctx context.Context, w http.ResponseWriter, r *h
 		return
 	}
 
-	if err := h.StopUseCase.Execute(r.Context(), projectID); err != nil {
+	user, ok := middleware.UserFromContext(r.Context())
+	if !ok {
+		http.Error(w, "not authenticated", http.StatusUnauthorized)
+		return
+	}
+
+	if err := h.StopUseCase.Execute(r.Context(), projectID, user.ID); err != nil {
 		status := http.StatusInternalServerError
 		if isNotFound(err) {
 			status = http.StatusNotFound
 		}
-		http.Error(w, err.Error(), status)
+		respondError(w, err, status)
 		return
 	}
 
@@ -42,5 +49,8 @@ func (h *StopHandler) ServeHTTP(ctx context.Context, w http.ResponseWriter, r *h
 }
 
 func isNotFound(err error) bool {
-	return strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "no live deployment")
+	return strings.Contains(err.Error(), "not found") ||
+		strings.Contains(err.Error(), "no live deployment") ||
+		strings.Contains(err.Error(), "never been deployed") ||
+		strings.Contains(err.Error(), "nothing is currently running")
 }

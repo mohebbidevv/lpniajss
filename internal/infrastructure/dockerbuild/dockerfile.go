@@ -45,6 +45,12 @@ func GenerateDockerfile(specs *nodedetect.ProjectSpecs) string {
 	// ── deps ──
 	fmt.Fprintf(&b, "FROM %s AS deps\n", img)
 	b.WriteString("WORKDIR /app\n")
+	// belt-and-suspenders alongside overridePrivateRegistry's lockfile
+	// rewrite: that fixes URLs already pinned in a lockfile, this covers
+	// any resolution npm/pnpm/yarn does that ISN'T pinned (no lockfile,
+	// or a package added after it was generated). Neither alone is enough.
+	b.WriteString("ENV npm_config_registry=" + publicNPMRegistry + "\n")
+	b.WriteString("ENV YARN_REGISTRY=" + publicNPMRegistry + "\n")
 	writeCorepack(&b, specs.PackageManager)
 	b.WriteString("COPY package.json ./\n")
 	if specs.Lockfile != "" {

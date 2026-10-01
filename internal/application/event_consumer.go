@@ -2,13 +2,14 @@ package application
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
 	"golaunch/internal/domain/entities"
 	"golaunch/internal/domain/repository"
 	"golaunch/internal/infrastructure/caddy"
+	"golaunch/internal/infrastructure/logging"
 	"golaunch/internal/infrastructure/utils"
 	"golaunch/internal/queue"
 )
@@ -19,8 +20,17 @@ import (
 // before resubmitting the deploy job, so a fast-crashing bad build doesn't
 // hot-loop the build workers.
 const (
-	defaultMaxRestarts  = 3
+	// defaultMaxRestarts is deliberately lower than the worker pool's own
+	// retry count. The two systems compound: every restart here is a fresh
+	// Submit that gets its own full set of pool retries, so 3 and 3 meant a
+	// worst case near a dozen build attempts per project — all of them
+	// firing at once across every project when the cause is shared.
+	defaultMaxRestarts  = 2
 	defaultRestartDelay = 5 * time.Second
+
+	// maxRestartDelay caps the exponential growth below, so a project that
+	// keeps crashing backs off instead of retrying on a fixed short timer.
+	maxRestartDelay = 2 * time.Minute
 )
 
 // EventConsumer is a long-lived goroutine that watches Runtime.Events() and
@@ -67,9 +77,11 @@ func (c *EventConsumer) ResetCrashCount(projectID string) {
 // Run blocks consuming events until ctx is cancelled or the runtime's event
 // channel closes. Call it in its own goroutine.
 func (c *EventConsumer) Run(ctx context.Context) {
+	log := logging.From(ctx).With("component", "event-consumer")
+
 	events, err := c.Runtime.Events(ctx)
 	if err != nil {
-		log.Printf("[event-consumer] failed to subscribe to runtime events: %v", err)
+		log.Error("failed to subscribe to runtime events", "error", err)
 		return
 	}
 
@@ -87,19 +99,21 @@ func (c *EventConsumer) Run(ctx context.Context) {
 }
 
 func (c *EventConsumer) handle(ctx context.Context, evt entities.RuntimeEvent) {
+	log := logging.From(ctx).With("component", "event-consumer")
+
 	if evt.Type != entities.RuntimeEventDied && evt.Type != entities.RuntimeEventOOM {
 		return
 	}
 
 	deploymentID := evt.Labels["deployment_id"]
 	if deploymentID == "" {
-		log.Printf("[event-consumer] death event with no deployment_id label, ignoring: %+v", evt)
+		log.Warn("death event carries no deployment_id label, ignoring", "event", evt)
 		return
 	}
 
 	deployment, err := c.DeploymentRepo.GetByID(ctx, deploymentID)
 	if err != nil {
-		log.Printf("[event-consumer] deployment %s not found: %v", deploymentID, err)
+		log.Error("deployment not found", "deployment_id", deploymentID, "error", err)
 		return
 	}
 
@@ -122,24 +136,24 @@ func (c *EventConsumer) handle(ctx context.Context, evt entities.RuntimeEvent) {
 	}
 
 	if err := c.DeploymentRepo.SetFailed(ctx, deploymentID, reason, exitCode); err != nil {
-		log.Printf("[event-consumer] failed to mark deployment %s crashed: %v", deploymentID, err)
+		log.Error("failed to mark deployment crashed", "deployment_id", deploymentID, "error", err)
 	}
 	// SetFailed sets DeploymentFailed; a death after the fact is a crash,
 	// not a build failure — record that distinction explicitly.
 	if err := c.DeploymentRepo.UpdateStatus(ctx, deploymentID, entities.DeploymentCrashed); err != nil {
-		log.Printf("[event-consumer] failed to set deployment %s status crashed: %v", deploymentID, err)
+		log.Error("failed to set deployment status crashed", "deployment_id", deploymentID, "error", err)
 	}
 
 	project, err := c.ProjectRepo.GetByID(ctx, deployment.ProjectID)
 	if err != nil {
-		log.Printf("[event-consumer] project %s not found, cannot remove Caddy route: %v", deployment.ProjectID, err)
+		log.Error("project not found, cannot remove route", "project_id", deployment.ProjectID, "error", err)
 		return
 	}
-	if err := c.Caddy.RemoveRoute(project.Slug); err != nil {
-		log.Printf("[event-consumer] failed to remove Caddy route for slug %s: %v", project.Slug, err)
+	if err := c.Caddy.RemoveRoute(project.ID); err != nil {
+		log.Error("failed to remove route", "slug", project.Slug, "error", err)
 	}
 	if err := c.ProjectRepo.UpdateStatus(ctx, project.ID, entities.StatusFailed); err != nil {
-		log.Printf("[event-consumer] failed to mark project %s failed: %v", project.ID, err)
+		log.Error("failed to mark project failed", "project_id", project.ID, "error", err)
 	}
 
 	c.maybeRestart(project.ID)
@@ -155,12 +169,24 @@ func (c *EventConsumer) maybeRestart(projectID string) {
 	c.mu.Unlock()
 
 	if count > c.MaxRestarts {
-		log.Printf("[event-consumer] project %s crashed %d times in a row, giving up on auto-restart", projectID, count)
+		slog.Warn("giving up on auto-restart after consecutive crashes", "project_id", projectID, "crashes", count)
 		return
 	}
 
-	log.Printf("[event-consumer] project %s crashed (attempt %d/%d), scheduling auto-restart in %s", projectID, count, c.MaxRestarts, c.RestartDelay)
-	time.AfterFunc(c.RestartDelay, func() {
-		c.WorkerPool.Submit(queue.Job{ID: utils.NewID(), ProjectID: projectID})
+	// The delay grows with the crash count so a crash-looping app backs off
+	// rather than hammering the build workers on a fixed 5s timer.
+	delay := c.RestartDelay << uint(count-1)
+	if delay > maxRestartDelay {
+		delay = maxRestartDelay
+	}
+
+	slog.Info("scheduling auto-restart after crash", "project_id", projectID, "attempt", count, "max", c.MaxRestarts, "delay", delay)
+	time.AfterFunc(delay, func() {
+		// Submit can now legitimately refuse — pool draining, queue full,
+		// or the circuit breaker open. Dropping that silently would make a
+		// restart look scheduled when it never happened.
+		if err := c.WorkerPool.Submit(queue.Job{ID: utils.NewID(), ProjectID: projectID}); err != nil {
+			slog.Error("could not resubmit project for restart", "project_id", projectID, "error", err)
+		}
 	})
 }

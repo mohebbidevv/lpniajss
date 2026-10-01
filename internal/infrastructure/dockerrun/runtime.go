@@ -24,6 +24,13 @@ type DockerRuntime struct {
 
 var _ repository.Runtime = (*DockerRuntime)(nil)
 
+// Ping checks that the daemon is reachable. The SDK returns a types.Ping
+// payload we have no use for; only the error matters.
+func (r *DockerRuntime) Ping(ctx context.Context) error {
+	_, err := r.cli.Ping(ctx)
+	return err
+}
+
 func New(cli *client.Client, cfg Config) *DockerRuntime {
 	return &DockerRuntime{cli: cli, cfg: cfg.withDefaults()}
 }

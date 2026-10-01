@@ -83,10 +83,18 @@ func (r *DockerRuntime) translate(spec entities.RuntimeSpec) (*container.Config,
 			// is OOM-killed promptly instead of thrashing the host.
 			MemorySwap: memoryBytes,
 			NanoCPUs:   int64(limits.CPUCores * 1e9),
-			PidsLimit:  &pids,
+			// PidsLimit is the pids cgroup — genuinely per-container, and
+			// the thing that actually contains a fork bomb. There is
+			// deliberately no "nproc" ulimit beside it: RLIMIT_NPROC is
+			// enforced per-UID host-wide, not per-container, so with every
+			// container running as UID 1000 it counts the host user's own
+			// desktop processes too and no container can exec even its
+			// first process.
+			PidsLimit: &pids,
 			Ulimits: []*container.Ulimit{
+				// RLIMIT_NOFILE is per-process, so unlike nproc it means
+				// what it looks like it means.
 				{Name: "nofile", Soft: r.cfg.NoFileSoft, Hard: r.cfg.NoFileHard},
-				{Name: "nproc", Soft: pids, Hard: pids},
 			},
 		},
 	}

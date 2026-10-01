@@ -98,10 +98,54 @@ func (repo *DeploymentRepository) ListByStatus(ctx context.Context, status entit
 	return out, nil
 }
 
+func (repo *DeploymentRepository) ListByProject(ctx context.Context, projectID string) ([]*entities.Deployment, error) {
+	query := `
+		SELECT id, project_id, image_ref, container_id, status, port,
+		       failure_reason, exit_code, created_at, started_at, stopped_at
+		FROM deployments
+		WHERE project_id = $1
+		ORDER BY created_at DESC
+	`
+	rows, err := repo.DB.Query(ctx, query, projectID)
+	if err != nil {
+		return nil, entities.MapPostgresError(err)
+	}
+	defer rows.Close()
+
+	out := make([]*entities.Deployment, 0)
+	for rows.Next() {
+		d := &entities.Deployment{}
+		if err := rows.Scan(
+			&d.ID, &d.ProjectID, &d.ImageRef, &d.ContainerID, &d.Status, &d.Port,
+			&d.FailureReason, &d.ExitCode, &d.CreatedAt, &d.StartedAt, &d.StoppedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan deployment row: %w", err)
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows: %w", err)
+	}
+	return out, nil
+}
+
 func (repo *DeploymentRepository) UpdateStatus(ctx context.Context, id string, status entities.DeploymentStatus) error {
 	_, err := repo.DB.Exec(ctx,
 		`UPDATE deployments SET status = $1 WHERE id = $2`,
 		status, id,
+	)
+	return err
+}
+
+// SetImageRef records the image a build actually produced. Deployment rows
+// are created before the build runs (the tag needs the row's own ID), so
+// ImageRef starts empty and is only ever true once this is called — without
+// it, every deployment row in the database would carry an empty image_ref
+// forever, and rollback/GC would have no way to know which image to use.
+func (repo *DeploymentRepository) SetImageRef(ctx context.Context, id, imageRef string) error {
+	_, err := repo.DB.Exec(ctx,
+		`UPDATE deployments SET image_ref = $1 WHERE id = $2`,
+		imageRef, id,
 	)
 	return err
 }

@@ -14,6 +14,7 @@ const (
 
 type Project struct {
 	ID             string
+	UserID         string // owner — every project belongs to exactly one account
 	Name           string // original uploaded filename
 	Slug           string // public subdomain
 	UniqueKey      string // internal ID
@@ -33,8 +34,9 @@ type Project struct {
 
 // NewProject constructs a project in its initial pending state.
 // slug should already be validated/uniqued by the caller before this is called.
-func NewProject(name, slug, uniqueKey, sourceType, sourceLocation string) *Project {
+func NewProject(userID, name, slug, uniqueKey, sourceType, sourceLocation string) *Project {
 	return &Project{
+		UserID:         userID,
 		Name:           name,
 		Slug:           slug,
 		UniqueKey:      uniqueKey,
@@ -47,8 +49,9 @@ func NewProject(name, slug, uniqueKey, sourceType, sourceLocation string) *Proje
 // NewGitProject constructs a project whose source is a git repo. sourceLocation
 // is the local directory it's cloned into (or will be cloned into); repoURL/ref
 // are kept so DeployPipeline can re-sync from origin on every subsequent deploy.
-func NewGitProject(name, slug, uniqueKey, sourceLocation, repoURL string, ref *string) *Project {
+func NewGitProject(userID, name, slug, uniqueKey, sourceLocation, repoURL string, ref *string) *Project {
 	return &Project{
+		UserID:         userID,
 		Name:           name,
 		Slug:           slug,
 		UniqueKey:      uniqueKey,

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types/build"
+	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
 
@@ -108,14 +109,23 @@ func (b *DockerImageBuilder) Build(ctx context.Context, req entities.BuildReques
 // detection — an author who wrote a Dockerfile knows things about their app
 // that package.json can't express.
 func (b *DockerImageBuilder) resolveDockerfile(sourceDir string, logSink func(entities.LogLine)) (string, map[string]string, error) {
+	// package manager/lockfile detection runs unconditionally — a broken
+	// lockfile is orthogonal to whether the project brought its own
+	// Dockerfile, so this must not live inside the generate-only branch.
+	specs := nodedetect.GetProjectSpecs(sourceDir, ContainerPort)
+
+	extraFiles := map[string]string{}
+	if err := b.overridePrivateRegistry(sourceDir, specs, extraFiles, logSink); err != nil {
+		return "", nil, err
+	}
+
 	if _, err := os.Stat(filepath.Join(sourceDir, "Dockerfile")); err == nil {
 		logSink(entities.LogLine{Stream: entities.LogInfo, Text: "using the Dockerfile shipped with this project"})
-		return "Dockerfile", nil, nil
+		return "Dockerfile", extraFiles, nil
 	} else if !os.IsNotExist(err) {
 		return "", nil, fmt.Errorf("stat Dockerfile: %w", err)
 	}
 
-	specs := nodedetect.GetProjectSpecs(sourceDir, ContainerPort)
 	dockerfile := GenerateDockerfile(specs)
 
 	logSink(entities.LogLine{
@@ -124,7 +134,38 @@ func (b *DockerImageBuilder) resolveDockerfile(sourceDir string, logSink func(en
 			frameworkName(specs), specs.NodeMajor, specs.PackageManager),
 	})
 
-	return generatedDockerfileName, map[string]string{generatedDockerfileName: dockerfile}, nil
+	extraFiles[generatedDockerfileName] = dockerfile
+	return generatedDockerfileName, extraFiles, nil
+}
+
+// overridePrivateRegistry reads the project's lockfile, if it has one, and
+// rewrites any "resolved" entry pointing at a private/third-party registry
+// mirror back to the public npm registry — see forcePublicRegistry for why
+// this has to touch the lockfile itself rather than just setting a
+// registry env var. The rewritten content is added to extraFiles under the
+// lockfile's own name, which context.go's tar walk treats as authoritative
+// over the real file on disk.
+func (b *DockerImageBuilder) overridePrivateRegistry(sourceDir string, specs *nodedetect.ProjectSpecs, extraFiles map[string]string, logSink func(entities.LogLine)) error {
+	if specs.Lockfile == "" {
+		return nil
+	}
+
+	content, err := os.ReadFile(filepath.Join(sourceDir, specs.Lockfile))
+	if err != nil {
+		return fmt.Errorf("read lockfile: %w", err)
+	}
+
+	rewritten, changed := forcePublicRegistry(specs.PackageManager, content)
+	if !changed {
+		return nil
+	}
+
+	extraFiles[specs.Lockfile] = string(rewritten)
+	logSink(entities.LogLine{
+		Stream: entities.LogInfo,
+		Text:   fmt.Sprintf("%s referenced a private registry mirror — rewriting to the public npm registry", specs.Lockfile),
+	})
+	return nil
 }
 
 func frameworkName(specs *nodedetect.ProjectSpecs) string {
@@ -148,10 +189,14 @@ func memorySwapFor(memoryMB int64) int64 {
 // ── build output ─────────────────────────────────────────────────────────
 
 // buildMessage is one frame of the daemon's newline-delimited JSON build
-// stream.
+// stream. During an image pull the daemon sends one status frame per chunk
+// downloaded — tens or hundreds per layer, all carrying the same Status
+// text ("Downloading") with only ProgressDetail changing — so ID is what
+// lets streamBuildOutput tell "still the same phase" from "phase changed".
 type buildMessage struct {
 	Stream string `json:"stream"`
 	Status string `json:"status"`
+	ID     string `json:"id"`
 	Error  string `json:"error"`
 
 	ErrorDetail *struct {
@@ -168,6 +213,11 @@ type buildMessage struct {
 // image.
 func streamBuildOutput(body io.Reader, logSink func(entities.LogLine)) error {
 	decoder := json.NewDecoder(body)
+
+	// last phase seen per layer ID, so a pull's per-chunk progress frames
+	// (same Status, same ID, repeated hundreds of times) collapse into one
+	// line per real phase change instead of flooding the stream.
+	lastStatus := make(map[string]string)
 
 	for {
 		var msg buildMessage
@@ -190,10 +240,21 @@ func streamBuildOutput(body io.Reader, logSink func(entities.LogLine)) error {
 		if msg.Stream != "" {
 			emitLines(logSink, entities.LogStdout, msg.Stream)
 		}
-		if msg.Status != "" {
-			emitLines(logSink, entities.LogInfo, msg.Status)
+		if msg.Status != "" && lastStatus[msg.ID] != msg.Status {
+			lastStatus[msg.ID] = msg.Status
+			emitLines(logSink, entities.LogInfo, statusLine(msg))
 		}
 	}
+}
+
+// statusLine prefixes a status with its layer ID when there is one, so
+// "Downloading" / "Pull complete" for five different layers don't read as
+// five identical, unattributable lines.
+func statusLine(msg buildMessage) string {
+	if msg.ID == "" {
+		return msg.Status
+	}
+	return msg.ID + ": " + msg.Status
 }
 
 // emitLines splits a frame into individual log lines. The daemon batches
@@ -223,6 +284,24 @@ func (b *DockerImageBuilder) ImageExists(ctx context.Context, imageRef string) (
 
 // RemoveImage deletes an image. A missing image is treated as success —
 // the caller wanted it gone, and it is.
+// PruneBuildCache reclaims build cache entries untouched for keepSince.
+//
+// Deliberately filtered by age rather than All:true — a blanket prune would
+// throw away the warm layer cache that makes an incremental redeploy fast,
+// trading a one-off disk win for a permanent build slowdown.
+func (b *DockerImageBuilder) PruneBuildCache(ctx context.Context, keepSince time.Duration) (uint64, error) {
+	report, err := b.cli.BuildCachePrune(ctx, build.CachePruneOptions{
+		Filters: filters.NewArgs(filters.Arg("until", keepSince.String())),
+	})
+	if err != nil {
+		return 0, fmt.Errorf("prune build cache: %w", err)
+	}
+	if report == nil {
+		return 0, nil
+	}
+	return report.SpaceReclaimed, nil
+}
+
 func (b *DockerImageBuilder) RemoveImage(ctx context.Context, imageRef string) error {
 	_, err := b.cli.ImageRemove(ctx, imageRef, image.RemoveOptions{PruneChildren: true})
 	if err != nil && !client.IsErrNotFound(err) {

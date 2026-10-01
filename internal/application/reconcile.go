@@ -2,25 +2,27 @@ package application
 
 import (
 	"context"
-	"log"
 
 	"golaunch/internal/domain/entities"
 	"golaunch/internal/domain/repository"
 	"golaunch/internal/infrastructure/caddy"
+	"golaunch/internal/infrastructure/logging"
 )
 
 // Reconciler runs once at startup to settle DB state against whatever the
 // runtime actually has running — the process may have been killed and
 // restarted while deployments were live.
 type Reconciler struct {
+	ProjectRepo    repository.ProjectRepository
 	DeploymentRepo repository.DeploymentRepository
 	Runtime        repository.Runtime
 	Caddy          *caddy.CaddyClient
 	Pipeline       *DeployPipeline
 }
 
-func NewReconciler(deploymentRepo repository.DeploymentRepository, runtime repository.Runtime, caddyClient *caddy.CaddyClient, pipeline *DeployPipeline) *Reconciler {
+func NewReconciler(projectRepo repository.ProjectRepository, deploymentRepo repository.DeploymentRepository, runtime repository.Runtime, caddyClient *caddy.CaddyClient, pipeline *DeployPipeline) *Reconciler {
 	return &Reconciler{
+		ProjectRepo:    projectRepo,
 		DeploymentRepo: deploymentRepo,
 		Runtime:        runtime,
 		Caddy:          caddyClient,
@@ -38,15 +40,28 @@ func NewReconciler(deploymentRepo repository.DeploymentRepository, runtime repos
 //   - runtime has it, DB doesn't know about it as running: an orphan left
 //     over from a previous run — stop it.
 func (r *Reconciler) Run(ctx context.Context) {
+	log := logging.From(ctx).With("component", "reconciler")
+
+	// First, before anything else looks at deployments: a row left
+	// mid-build by a crash or restart will never be advanced by anyone,
+	// because the goroutine that owned it is gone. Nothing else in this
+	// function considers non-terminal statuses, so without this the row
+	// stays "building" forever and the user stares at a dead spinner.
+	if n, err := FailAbandonedDeployments(ctx, r.DeploymentRepo, r.ProjectRepo, 0); err != nil {
+		log.Error("abandoned-deployment sweep failed", "error", err)
+	} else if n > 0 {
+		log.Info("marked abandoned deployments as failed", "count", n)
+	}
+
 	dbRunning, err := r.DeploymentRepo.ListByStatus(ctx, entities.DeploymentRunning)
 	if err != nil {
-		log.Printf("[reconcile] failed to list running deployments: %v", err)
+		log.Error("failed to list running deployments", "error", err)
 		return
 	}
 
 	instances, err := r.Runtime.List(ctx, nil)
 	if err != nil {
-		log.Printf("[reconcile] failed to list runtime instances: %v", err)
+		log.Error("failed to list runtime instances", "error", err)
 		return
 	}
 
@@ -63,25 +78,29 @@ func (r *Reconciler) Run(ctx context.Context) {
 
 		inst, ok := byDeploymentID[d.ID]
 		if !ok {
-			log.Printf("[reconcile] deployment %s marked running in DB but not found in runtime — redeploying", d.ID)
+			log.Warn("deployment marked running in DB but absent from runtime, redeploying", "deployment_id", d.ID)
 			if err := r.Pipeline.Deploy(ctx, d.ProjectID); err != nil {
-				log.Printf("[reconcile] %s: redeploy failed: %v", d.ProjectID, err)
+				log.Error("redeploy failed", "project_id", d.ProjectID, "error", err)
 			}
 			continue
 		}
 
-		slug := inst.Labels["slug"]
-		if slug == "" {
-			log.Printf("[reconcile] deployment %s missing slug label, cannot verify route", d.ID)
+		// slug comes from the project row, never from the container's own
+		// labels — those are frozen at Start() time, so trusting them here
+		// would silently resurrect a slug the user has since renamed away
+		// from on every restart.
+		project, err := r.ProjectRepo.GetByID(ctx, d.ProjectID)
+		if err != nil {
+			log.Error("cannot load project", "project_id", d.ProjectID, "error", err)
 			continue
 		}
 		upstream, err := r.Runtime.Endpoint(ctx, inst.Handle)
 		if err != nil {
-			log.Printf("[reconcile] cannot resolve endpoint for deployment %s: %v", d.ID, err)
+			log.Error("cannot resolve endpoint", "deployment_id", d.ID, "error", err)
 			continue
 		}
-		if err := r.Caddy.RegisterRoute(slug, upstream); err != nil {
-			log.Printf("[reconcile] failed to ensure route for %s: %v", slug, err)
+		if err := r.Caddy.RegisterRoute(project.ID, project.Slug, upstream); err != nil {
+			log.Error("failed to ensure route", "slug", project.Slug, "error", err)
 		}
 	}
 
@@ -89,12 +108,12 @@ func (r *Reconciler) Run(ctx context.Context) {
 		if knownDeploymentIDs[deploymentID] {
 			continue
 		}
-		log.Printf("[reconcile] orphaned runtime instance for deployment %s — stopping", deploymentID)
+		log.Warn("stopping orphaned runtime instance", "deployment_id", deploymentID)
 		if err := r.Runtime.Stop(ctx, inst.Handle, stopTimeoutSeconds); err != nil {
-			log.Printf("[reconcile] failed to stop orphan %s: %v", deploymentID, err)
+			log.Error("failed to stop orphan", "deployment_id", deploymentID, "error", err)
 		}
 		if err := r.Runtime.Remove(ctx, inst.Handle); err != nil {
-			log.Printf("[reconcile] failed to remove orphan %s: %v", deploymentID, err)
+			log.Error("failed to remove orphan", "deployment_id", deploymentID, "error", err)
 		}
 	}
 }

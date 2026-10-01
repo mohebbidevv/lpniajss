@@ -6,8 +6,6 @@ import (
 	"net/http"
 	"os"
 	"time"
-
-	"golaunch/internal/infrastructure/utils"
 )
 
 // ANSI colors — cheap, no dependency, works in any real terminal
@@ -38,10 +36,20 @@ func statusColor(status int) string {
 // silently break streaming handlers downstream.
 type statusRecorder struct {
 	http.ResponseWriter
-	status int
+	status  int
+	written bool
 }
 
+// WriteHeader only honours the first call — that's what the real
+// ResponseWriter does on the wire too, so the recorded status always
+// matches what the client actually received, even when a handler bug
+// calls WriteHeader twice.
 func (r *statusRecorder) WriteHeader(code int) {
+	if r.written {
+		r.ResponseWriter.WriteHeader(code)
+		return
+	}
+	r.written = true
 	r.status = code
 	r.ResponseWriter.WriteHeader(code)
 }
@@ -59,13 +67,20 @@ func (r *statusRecorder) Flush() {
 // format: 14:32:07 | 200 |   842ms | GET    /api/projects | req_a1b2c3
 func RequestLogger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Health probes run every few seconds forever. Logging them would
+		// make them the overwhelming majority of log volume and bury real
+		// traffic.
+		if isProbePath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		start := time.Now()
 
-		reqID := r.Header.Get("X-Request-ID")
-		if reqID == "" {
-			reqID = utils.NewID()
-		}
-		w.Header().Set("X-Request-ID", reqID)
+		// The ID is minted by the RequestID middleware, which must wrap
+		// this one — reading it here keeps the access log and every
+		// downstream layer on the same identifier.
+		reqID := RequestIDFrom(r)
 
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 
@@ -83,6 +98,10 @@ func RequestLogger(next http.Handler) http.Handler {
 			colorGray, shortID(reqID), colorReset,
 		)
 	})
+}
+
+func isProbePath(path string) bool {
+	return path == "/healthz" || path == "/readyz"
 }
 
 // shortID trims a long id down to something readable in a terminal line

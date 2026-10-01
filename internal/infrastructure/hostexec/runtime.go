@@ -29,6 +29,10 @@ func NewHostExecRuntime() *HostExecRuntime {
 	}
 }
 
+// Ping always succeeds: this runtime launches child processes directly, so
+// there is no external daemon whose absence could make it unusable.
+func (r *HostExecRuntime) Ping(ctx context.Context) error { return nil }
+
 // ── registry ─────────────────────────────────────────────────────────
 
 func (r *HostExecRuntime) add(handle string, tp *TrackedProcess) {

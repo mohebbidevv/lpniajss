@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"golaunch/internal/domain/repository"
+	"golaunch/internal/infrastructure/logging"
 	"golaunch/internal/infrastructure/utils"
 	"golaunch/internal/queue"
 	"os"
@@ -25,31 +26,55 @@ type RunProjectUseCase struct {
 	ProjectRepo repository.ProjectRepository
 	WP          *queue.WorkerPool
 	Registry    *LogRegistry
+
+	// UserRepo is only consulted to enforce the email-verification gate.
+	// Nil disables that gate, which keeps existing tests constructing this
+	// use case unchanged.
+	UserRepo repository.UserRepository
 }
 
-func NewRunProjectUseCase(repo repository.ProjectRepository, wp *queue.WorkerPool, registry *LogRegistry) *RunProjectUseCase {
+func NewRunProjectUseCase(repo repository.ProjectRepository, wp *queue.WorkerPool, registry *LogRegistry, userRepo repository.UserRepository) *RunProjectUseCase {
 	return &RunProjectUseCase{
 		ProjectRepo: repo,
 		Registry:    registry,
 		WP:          wp,
+		UserRepo:    userRepo,
 	}
 }
 
 func (uc *RunProjectUseCase) Execute(
 	ctx context.Context,
-	projectID string,
+	projectID, userID string,
 ) (<-chan LogLine, error) {
 
-	if _, err := uc.ProjectRepo.GetByID(ctx, projectID); err != nil {
+	project, err := uc.ProjectRepo.GetByID(ctx, projectID)
+	if err != nil {
 		return nil, fmt.Errorf("project not found: %w", err)
+	}
+	if err := mustOwnProject(project, userID); err != nil {
+		return nil, err
+	}
+
+	// Deploying is gated on a verified address, but signing in is not.
+	// Deploy is the expensive, abusable action, so putting the gate here
+	// stops throwaway-address abuse without adding friction to signup.
+	if uc.UserRepo != nil {
+		user, err := uc.UserRepo.GetByID(ctx, userID)
+		if err != nil || user == nil {
+			return nil, fmt.Errorf("user not found")
+		}
+		if !user.EmailVerified {
+			return nil, ErrEmailNotVerified
+		}
 	}
 
 	logCh := make(chan LogLine, 64)
 	uc.Registry.Register(projectID, logCh)
 
-	err := uc.WP.Submit(queue.Job{
+	err = uc.WP.Submit(queue.Job{
 		ID:        utils.NewID(),
 		ProjectID: projectID,
+		RequestID: logging.RequestIDFrom(ctx),
 	})
 
 	// queue full

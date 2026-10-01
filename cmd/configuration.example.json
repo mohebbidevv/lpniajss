@@ -1,6 +1,21 @@
 {
     "server": {
-        "port": "5000"
+        "port": "5000",
+        "allowed_origins": [
+            "http://localhost:3000"
+        ],
+        "secure_cookies": false,
+        "anonymous_submit_limit": 5,
+        "anonymous_submit_window_seconds": 600,
+        "internal_token": "",
+        "log_level": "info",
+        "log_format": "text",
+        "bind_address": "127.0.0.1",
+        "frontend_base_url": "http://localhost:3000",
+        "env_encryption_key": "",
+        "login_ip_limit": 20,
+        "login_account_limit": 5,
+        "login_window_seconds": 900
     },
     "db": {
         "host": "127.0.0.1",
@@ -25,6 +40,14 @@
         "build_timeout_seconds": 900,
         "build_memory_mb": 2048,
         "build_cpu_cores": 2,
-        "ready_timeout_seconds": 90
+        "ready_timeout_seconds": 90,
+        "image_retention_count": 5,
+        "image_sweep_interval_minutes": 60,
+        "data_root": "/var/lib/docker",
+        "min_build_disk_gb": 5
+    },
+    "housekeeping": {
+        "anonymous_project_ttl_minutes": 60,
+        "anonymous_reap_interval_minutes": 15
     }
 }

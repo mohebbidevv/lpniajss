@@ -1,0 +1,48 @@
+# Production Caddyfile. The committed ./Caddyfile is the local-dev one; this
+# is its TLS-terminating counterpart.
+#
+# REQUIRES a Caddy binary built with your DNS provider's plugin — the stock
+# binary has none, and a wildcard certificate cannot be issued over HTTP-01.
+# Only the DNS-01 challenge can validate *.example.com:
+#
+#     xcaddy build --with github.com/caddy-dns/cloudflare
+#
+# One wildcard, not per-project certificates: Let's Encrypt allows 50 certs
+# per registered domain per week, which per-tenant issuance would exhaust as
+# soon as signups are real.
+#
+# Scope the DNS token to Zone:DNS:Edit on this one zone. A global API key on
+# the box that runs untrusted user containers is a very bad trade.
+
+{
+	admin localhost:2019
+	email you@example.com
+}
+
+*.example.com {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
+
+	# Per-project routes are injected by the control plane through the admin
+	# API, each carrying an @id of golaunch-project-<projectID>. Nothing
+	# static belongs here; this block only has to exist so the wildcard
+	# certificate is provisioned.
+	#
+	# NOTE: a wildcard covers exactly one label. *.example.com matches
+	# app.example.com but NOT a.b.example.com, so slugs must never contain
+	# a dot — slugify already strips them.
+	respond "app not found" 404
+}
+
+example.com {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
+
+	# The control plane binds to loopback (server.bind_address), so this is
+	# the only path to it. That is what keeps X-Forwarded-For trustworthy:
+	# reachable directly, a client could forge it and defeat every IP-keyed
+	# rate limiter in the app.
+	reverse_proxy 127.0.0.1:5000
+}
